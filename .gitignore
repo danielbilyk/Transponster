@@ -3,3 +3,4 @@ venv/
 test-media/
 *.sublime*
 .DS_Store
+transcription_metrics.json
