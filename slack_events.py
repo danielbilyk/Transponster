@@ -126,7 +126,7 @@ def handle_file_shared_events(event, say, client):
         logging.info("7: Uploading .txt file to Slack.")
         try:
             client.files_upload_v2(
-                channels=channel_id,
+                channel=channel_id,
                 file=txt_file_path,
                 title="Transcription",
                 initial_comment=f":heavy_check_mark: Все вийшло, осьо твоя розшифровка.",
