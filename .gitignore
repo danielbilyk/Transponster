@@ -1,6 +1,7 @@
 .env
+.log
+.DS_Store
+*.sublime*
+transcription_metrics.json
 venv/
 test-media/
-*.sublime*
-.DS_Store
-transcription_metrics.json

@@ -14,99 +14,119 @@ from dotenv import load_dotenv
 # Load environment variables from .env if present
 load_dotenv()
 
+# Logging setup
+LOG_FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
+logging.basicConfig(level=logging.INFO, format=LOG_FORMAT)
+
+# Set up file logging
+file_handler = logging.FileHandler("bot.log")
+file_handler.setLevel(logging.INFO)
+file_handler.setFormatter(logging.Formatter(LOG_FORMAT))
+logging.getLogger().addHandler(file_handler)
+
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 
-# Slack credentials
+# Environment & Credentials
 SLACK_BOT_TOKEN = os.getenv("SLACK_BOT_TOKEN")
 SLACK_SIGNING_SECRET = os.getenv("SLACK_SIGNING_SECRET")
-
-# ElevenLabs API
 ELEVENLABS_API_KEY = os.getenv("ELEVENLABS_API_KEY")
-
-# "Metrics" filepath
 METRICS_FILE = os.getenv("METRICS_FILE", "transcription_metrics.json")
 
-def load_metrics():
-    """Load metrics from JSON file if it exists."""
-    metrics_path = Path(METRICS_FILE)
-    if metrics_path.exists():
-        try:
-            with open(metrics_path, 'r') as f:
-                return json.load(f)
-        except json.JSONDecodeError:
-            logging.error(f"Error parsing metrics file {METRICS_FILE}. Starting with fresh metrics.")
-    
-    # Default metrics structure
-    return {
-        "users": {},
-        "total_files_processed": 0,
-        "total_minutes_processed": 0,
-        "transcription_success_rate": {
-            "successful": 0,
-            "failed": 0
-        },
-        "average_processing_time_seconds": {
-            "total_time": 0,
-            "count": 0
-        }
-    }
+class MetricsManager:
+    """Class to handle loading, updating, and saving transcription metrics."""
+    def __init__(self, metrics_file):
+        self.metrics_file = Path(metrics_file)
+        self.metrics = self.load_metrics()
 
-def save_metrics(metrics):
-    """Save metrics to JSON file."""
-    metrics_path = Path(METRICS_FILE)
-    # Create directory if it doesn't exist
-    metrics_path.parent.mkdir(parents=True, exist_ok=True)
-    
-    with open(metrics_path, 'w') as f:
-        json.dump(metrics, f, indent=2)
-
-def update_user_metrics(metrics, user_id, username, file_duration_minutes, success=True, processing_time=None):
-    """Update metrics for a specific user."""
-    # Initialize user if not present
-    if user_id not in metrics["users"]:
-        metrics["users"][user_id] = {
-            "username": username,
-            "files_uploaded": 0,
-            "total_minutes": 0,
-            "file_durations": [],
-            "success_rate": {
-                "successful": 0, 
+    def load_metrics(self):
+        """Load metrics from JSON file if it exists; otherwise return default metrics."""
+        if self.metrics_file.exists():
+            try:
+                with open(self.metrics_file, 'r') as f:
+                    return json.load(f)
+            except json.JSONDecodeError:
+                logging.error(f"Error parsing metrics file {self.metrics_file}. Starting with fresh metrics.")
+        # Default metrics structure
+        return {
+            "users": {},
+            "total_files_processed": 0,
+            "total_seconds_processed": 0,
+            "transcription_success_rate": {
+                "successful": 0,
                 "failed": 0
+            },
+            "average_processing_time_seconds": {
+                "total_time": 0,
+                "count": 0
+            },
+            "average_file_length_seconds": {
+                "total_length": 0,
+                "count": 0
             }
         }
-    
-    # Update user metrics
-    metrics["users"][user_id]["files_uploaded"] += 1
-    metrics["users"][user_id]["total_minutes"] += file_duration_minutes
-    metrics["users"][user_id]["file_durations"].append(file_duration_minutes)
-    
-    # Update success rate
-    if success:
-        metrics["users"][user_id]["success_rate"]["successful"] += 1
-        metrics["transcription_success_rate"]["successful"] += 1
-    else:
-        metrics["users"][user_id]["success_rate"]["failed"] += 1
-        metrics["transcription_success_rate"]["failed"] += 1
-    
-    # Update global metrics
-    metrics["total_files_processed"] += 1
-    metrics["total_minutes_processed"] += file_duration_minutes
-    
-    # Update processing time metrics if provided
-    if processing_time is not None:
-        metrics["average_processing_time_seconds"]["total_time"] += processing_time
-        metrics["average_processing_time_seconds"]["count"] += 1
-    
-    return metrics
 
-def get_file_duration_minutes(file_info):
-    """Extract file duration in minutes from file metadata if available."""
+    def save_metrics(self):
+        """Save current metrics to the JSON file."""
+        self.metrics_file.parent.mkdir(parents=True, exist_ok=True)
+        with open(self.metrics_file, 'w') as f:
+            json.dump(self.metrics, f, indent=2)
+
+    def update_user_metrics(self, user_id, username, file_duration_seconds, success=True, processing_time=None):
+        """
+        Update metrics for a specific user and global counters.
+        Automatically saves the metrics after updating.
+        """
+        # Initialize user metrics if not already present
+        if user_id not in self.metrics["users"]:
+            self.metrics["users"][user_id] = {
+                "username": username,
+                "files_uploaded": 0,
+                "total_seconds": 0,
+                "file_durations": [],
+                "success_rate": {
+                    "successful": 0,
+                    "failed": 0
+                }
+            }
+            
+        # Update per-user metrics
+        self.metrics["users"][user_id]["files_uploaded"] += 1
+        self.metrics["users"][user_id]["total_seconds"] += file_duration_seconds
+        self.metrics["users"][user_id]["file_durations"].append(file_duration_seconds)
+
+        # Update success/failure counts
+        if success:
+            self.metrics["users"][user_id]["success_rate"]["successful"] += 1
+            self.metrics["transcription_success_rate"]["successful"] += 1
+        else:
+            self.metrics["users"][user_id]["success_rate"]["failed"] += 1
+            self.metrics["transcription_success_rate"]["failed"] += 1
+
+        # Update global metrics
+        self.metrics["total_files_processed"] += 1
+        self.metrics["total_seconds_processed"] += file_duration_seconds
+        self.metrics["average_file_length_seconds"]["total_length"] += file_duration_seconds
+        self.metrics["average_file_length_seconds"]["count"] += 1
+
+        # Update processing time if provided
+        if processing_time is not None:
+            self.metrics["average_processing_time_seconds"]["total_time"] += processing_time
+            self.metrics["average_processing_time_seconds"]["count"] += 1
+
+        # Save updated metrics to file
+        self.save_metrics()
+
+# Instantiate the MetricsManager
+metrics_manager = MetricsManager(METRICS_FILE)
+
+def get_file_duration_seconds(file_info):
+    """Extract file duration in seconds from file metadata if available."""
     # Try to get duration from file info
-    duration_seconds = file_info.get("duration_ms")
+    duration_milliseconds = file_info.get("duration_ms")
     
-    if duration_seconds:
-        return duration_seconds / 60000
+    if duration_milliseconds:
+        return duration_milliseconds / 1000
     
     # If no duration is available, estimate based on file size
     # Very rough estimate: 1MB ~= 1 minute of audio at medium quality
@@ -179,20 +199,6 @@ def cleanup_temp_file(file_path):
     except Exception as e:
         logging.error(f"Error cleaning up temporary file {file_path}: {e}")
 
-# Initialize the Slack Bolt App
-app = App(
-    token=SLACK_BOT_TOKEN,
-    signing_secret=SLACK_SIGNING_SECRET
-)
-
-# Flask setup for the SlackRequestHandler
-flask_app = Flask(__name__)
-handler = SlackRequestHandler(app)
-
-# -----------------------------------------
-#   Helper Functions
-# -----------------------------------------
-
 def is_audio_or_video(fileinfo):
     """
     Check if the file is audio or video based on Slack's 'mimetype' or 'filetype'.
@@ -207,20 +213,14 @@ def is_audio_or_video(fileinfo):
     return False
 
 def file_too_large(fileinfo):
-    """
-    Check if the file size is greater than 1000 MB (1,000,000,000 bytes).
-    """
+
+    # Check if the file size is greater than 1000 MB.
     size_bytes = fileinfo.get("size", 0)
     return size_bytes > 1000 * 1_000_000
 
 def transcribe_file(file_path):
-    """
-    Sends the file to ElevenLabs for transcription.
-    This is a placeholder function; adapt as needed per official ElevenLabs docs.
-
-    If you're encountering SSL issues, you could temporarily add verify=False:
-        response = requests.post(url, headers=headers, files=files, data=data, verify=False)
-    """
+    
+    # Sends the file to ElevenLabs for transcription.
     url = "https://api.elevenlabs.io/v1/speech-to-text"
     headers = {
         "xi-api-key": ELEVENLABS_API_KEY,
@@ -253,6 +253,16 @@ def get_thread_ts(file_info, channel_id):
 
     return thread_ts
 
+# Initialize the Slack Bolt App
+app = App(
+    token=SLACK_BOT_TOKEN,
+    signing_secret=SLACK_SIGNING_SECRET
+)
+
+# Flask setup for the SlackRequestHandler
+flask_app = Flask(__name__)
+handler = SlackRequestHandler(app)
+
 # -----------------------------------------
 #   Slack Event Handlers
 # -----------------------------------------
@@ -265,7 +275,7 @@ def handle_file_shared_events(event, say, client):
     3) If valid, mention user about uploading + call ElevenLabs.
     4) If transcription fails, mention user. Otherwise, provide .txt.
     """
-    logging.info("Flow Step 0: file_shared event triggered.")
+    logging.info("file_shared event triggered.")
 
     # Start timing the process
     start_time = time.time()
@@ -274,12 +284,9 @@ def handle_file_shared_events(event, say, client):
     user_id = event["user_id"]
     channel_id = event.get("channel_id")
 
-    # Load metrics
-    metrics = load_metrics()
-
     # Default values in case of early exceptions
     username = user_id  # Fallback if we can't get the real username
-    file_duration_minutes = 0
+    file_duration_seconds = 0
     local_file_path = None  # Initialize for cleanup in finally block
 
     try:
@@ -288,67 +295,43 @@ def handle_file_shared_events(event, say, client):
         username = user_info["user"]["name"]
         
         # Retrieve file info from Slack
-        logging.info("Flow Step 1: Retrieving file info.")
+        logging.info("1: Retrieving file info.")
         file_info = client.files_info(file=file_id)["file"]
         logging.info(f"File info: {file_info}")
         
         # Get file duration in minutes
-        file_duration_minutes = get_file_duration_minutes(file_info)
-        logging.info(f"File duration: {file_duration_minutes:.2f} minutes")
+        file_duration_seconds = get_file_duration_seconds(file_info)
+        logging.info(f"File duration: {file_duration_seconds:.2f} seconds")
 
         # Figure out the thread_ts for the existing message so we can reply in-thread
         thread_ts = get_thread_ts(file_info, channel_id)
         logging.info(f"Derived thread_ts={thread_ts}")
 
-        # 1) Check if audio/video and mention user
-        logging.info("Flow Step 2: Checking if file is audio/video.")
+        # Check if audio/video
+        logging.info("2: Checking if file is audio/video.")
         if not is_audio_or_video(file_info):
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> The file you uploaded is NOT an audio/video format. Please upload an MP3, MP4, WAV, etc.",
+                text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі `.mp3`, `.wav`, `.m4a`, `.flac` чи `.ogg`.",
                 thread_ts=thread_ts
             )
             logging.info("File is not audio/video. Flow ended.")
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
-            return
 
-        # 2) Check file size and mention user
-        logging.info("Flow Step 3: Checking if file is too large (>1000 MB).")
+        # Check file size
+        logging.info("3: Checking if file is too large (>1000 MB).")
         if file_too_large(file_info):
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> The file size is over 1000 MB. Please shrink the file before uploading.",
+                text=f":no_good: Сорі, цей файл завеликий. Будь ласка, дай мені файл розміром до 1000 МБ.",
                 thread_ts=thread_ts
             )
             logging.info("File is too large. Flow ended.")
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
-            return
 
-        # 3) File is valid and mention user
-        logging.info("Flow Step 4: Downloading file & sending to ElevenLabs for transcription.")
+        #File is valid
+        logging.info("4: Downloading file & sending to ElevenLabs for transcription.")
         client.chat_postMessage(
             channel=channel_id,
-            text=f":saluting_face: Your file is valid. Uploading to ElevenLabs for transcription...",
+            text=f":saluting_face: Забираю в роботу. Відпишу тобі, коли буду готовий, або якщо поламаюся.",
             thread_ts=thread_ts
         )
 
@@ -357,104 +340,49 @@ def handle_file_shared_events(event, say, client):
         local_file_path = f"/tmp/{file_info['id']}_{file_info['name']}"
         headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
 
-        logging.info("Flow Step 4a: Downloading file from Slack.")
+        logging.info("4a: Downloading file from Slack.")
         r = requests.get(download_url, headers=headers)
         with open(local_file_path, "wb") as f:
             f.write(r.content)
         logging.info(f"File downloaded locally to {local_file_path}.")
 
         # 4) Send to ElevenLabs
-        logging.info("Flow Step 5: Transcribing file with ElevenLabs.")
+        logging.info("5: Transcribing file with ElevenLabs.")
         try:
             response = transcribe_file(local_file_path)
         except requests.exceptions.SSLError as e:
             logging.error(f"SSL error when calling ElevenLabs: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> There was an SSL error calling ElevenLabs. Please check your environment or certificates.",
+                text=f":expressionless: Сорі, у мене не вийшло, тому що \"there was an SSL error calling ElevenLabs.\"",
                 thread_ts=thread_ts
             )
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             return
+
         except Exception as e:
             logging.error(f"Error when calling ElevenLabs: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> There was an error calling ElevenLabs: {str(e)}",
+                text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {str(e)}",
                 thread_ts=thread_ts
             )
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             return
 
-        if response is None:
-            # Just in case something weird happened
+        if response is None or response.status_code != 200:
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> Unexpected error: No response from ElevenLabs.",
+                text=f":expressionless: Сорі, я не зміг зробити розшифровку.",
                 thread_ts=thread_ts
             )
-            logging.error("No response from ElevenLabs. Flow ended.")
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
-            return
-
-        logging.info(f"Transcription response status: {response.status_code}, body: {response.text}")
-
-        if response.status_code != 200:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f"<@{user_id}> There was an error transcribing your file. Please try again later.",
-                thread_ts=thread_ts
-            )
-            logging.error(f"Transcription failed. Status: {response.status_code}, Error: {response.text}")
-            
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
+            logging.error(f"Transcription failed. Status: {response.status_code if response else 'None'}, Error: {response.text if response else 'No response'}")
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             return
 
         # 5) If success, parse transcription text from the response
-        logging.info("Flow Step 6: Processing transcription result.")
+        logging.info("6: Processing transcription result.")
         transcription_result = response.json()
-        transcribed_text = transcription_result.get("text", "No text returned from ElevenLabs.")
-
-        # Use the helper function to create a formatted transcript file
         txt_file_path = write_transcript_file(transcription_result, file_info["name"])
         logging.info(f"Formatted transcription saved to {txt_file_path}.")
 
@@ -464,8 +392,8 @@ def handle_file_shared_events(event, say, client):
             client.files_upload_v2(
                 channels=channel_id,
                 file=txt_file_path,
-                title="Transcription",
-                initial_comment=f"<@{user_id}> Here is your transcription!",
+                title="Розшифровка",
+                initial_comment=f":heavy_check_mark: Все вийшло, осьо твоя розшифровка.",
                 thread_ts=thread_ts
             )
             logging.info("Transcription .txt uploaded to Slack.")
@@ -474,72 +402,38 @@ def handle_file_shared_events(event, say, client):
             processing_time = time.time() - start_time
             
             # Update metrics for successful processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=True,
-                processing_time=processing_time
-            )
-            save_metrics(metrics)
-            
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=True, processing_time=processing_time)
             logging.info(f"Flow completed successfully in {processing_time:.2f} seconds.")
 
         except Exception as e:
             logging.error(f"Error uploading .txt to Slack: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f"<@{user_id}> Could not upload the transcription file. Error: {e}",
+                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {e}",
                 thread_ts=thread_ts
             )
-
-            # Update metrics for failed processing
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username, 
-                file_duration_minutes, 
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             
     except Exception as e:
         logging.error(f"Unexpected error in handle_file_shared_events: {e}")
-            
         try:
-            # Try to update metrics with the failure
-            update_user_metrics(
-                metrics, 
-                user_id, 
-                username,  # Use the username value we have
-                file_duration_minutes,  # Use the duration value we have
-                success=False,
-                processing_time=time.time() - start_time
-            )
-            save_metrics(metrics)
+            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
         except Exception as metrics_error:
             logging.error(f"Could not update metrics after unexpected error: {metrics_error}")
     
     finally:
-        # Clean up temporary files regardless of success or failure
         if local_file_path and os.path.exists(local_file_path):
             cleanup_temp_file(local_file_path)
-            
-        # Also clean up the transcript file if it exists
         txt_file_path_to_clean = os.path.join("/tmp", f"{os.path.splitext(file_info['name'])[0]}.txt") if 'file_info' in locals() else None
         if txt_file_path_to_clean and os.path.exists(txt_file_path_to_clean):
             cleanup_temp_file(txt_file_path_to_clean)
 
 # -----------------------------------------
-#   Flask Routes
+#   Flask Route for Slack Events
 # -----------------------------------------
 @flask_app.route("/slack/events", methods=["POST"])
 def slack_events():
     return handler.handle(request)
 
-
 if __name__ == "__main__":
-    # Start the Flask server on port 3000
     flask_app.run(host="0.0.0.0", port=3000)
