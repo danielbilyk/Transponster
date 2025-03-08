@@ -1,3 +1,4 @@
+import logger_setup
 from flask import Flask, request
 import logging
 from slack_events import app as slack_app, handler
