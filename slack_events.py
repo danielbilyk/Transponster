@@ -137,7 +137,7 @@ def handle_file_shared_events(event, say, client):
             processing_time = time.time() - start_time
 
             metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=True, processing_time=processing_time)
-            logging.info(f"Flow completed successfully in {processing_time:.2f} seconds.")
+            logging.info(f"Flow completed successfully in {processing_time:.2f} seconds. User metrics updated.")
 
         except Exception as e:
             logging.error(f"Error uploading .txt to Slack: {e}")
