@@ -1,7 +1,7 @@
 import logger_setup
 from flask import Flask, request, redirect
 import logging
-from slack_events import app as slack_app, handler
+from slack_events import handler
 
 flask_app = Flask(__name__)
 
