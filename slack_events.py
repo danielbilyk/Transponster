@@ -10,7 +10,7 @@ from config import (
 )
 from metrics import MetricsManager
 from helpers import (
-    get_file_duration_seconds, is_audio_or_video, file_too_large, SUPPERTED_EXTENSIONS,
+    get_file_duration_seconds, is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file, cleanup_temp_file
 )
 
@@ -56,7 +56,7 @@ def handle_file_shared_events(event, say, client):
         # Validate file type
         logging.info("2: Checking if file is audio/video.")
         if not is_audio_or_video(file_info):
-            extensions = "`, `".join(SUPPERTED_EXTENSIONS)
+            extensions = "`, `".join(SUPPORTED_EXTENSIONS)
             client.chat_postMessage(
                 channel=channel_id,
                 text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі `{extensions}`.",
