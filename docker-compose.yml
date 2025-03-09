@@ -1,0 +1,13 @@
+version: "3.8"
+
+services:
+  transponster:
+    image: transponster-bot
+    container_name: transponster-container
+    env_file: .env
+    ports:
+      - "3000:3000"
+    restart: always
+    volumes:
+      - /apps/Transponster/bot.log:/app/bot.log
+      - /apps/Transponster/transcription_metrics.json:/app/transcription_metrics.json
