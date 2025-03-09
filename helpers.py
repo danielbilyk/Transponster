@@ -3,6 +3,8 @@ import logging
 import datetime
 import requests
 
+SUPPERTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg"]
+
 def get_file_duration_seconds(file_info):
     """Extract file duration in seconds from file metadata if available."""
     duration_ms = file_info.get("duration_ms")
@@ -84,7 +86,7 @@ def is_audio_or_video(fileinfo):
         return True
     # Fallback: check file extension if mimetype is generic
     filename = fileinfo.get("name", "").lower()
-    return filename.endswith((".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg"))
+    return filename.endswith(SUPPERTED_EXTENSIONS)
 
 def file_too_large(fileinfo):
     size_bytes = fileinfo.get("size", 0)

@@ -10,7 +10,7 @@ from config import (
 )
 from metrics import MetricsManager
 from helpers import (
-    get_file_duration_seconds, is_audio_or_video, file_too_large,
+    get_file_duration_seconds, is_audio_or_video, file_too_large, SUPPERTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file, cleanup_temp_file
 )
 
@@ -56,9 +56,10 @@ def handle_file_shared_events(event, say, client):
         # Validate file type
         logging.info("2: Checking if file is audio/video.")
         if not is_audio_or_video(file_info):
+            extensions = "`, `".join(SUPPERTED_EXTENSIONS)
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі `.mp3`, `.wav`, `.m4a`, `.flac` чи `.ogg`.",
+                text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі `{extensions}`.",
                 thread_ts=thread_ts
             )
             logging.info("File is not audio/video. Flow ended.")
@@ -101,7 +102,7 @@ def handle_file_shared_events(event, say, client):
             logging.error(f"Error when calling ElevenLabs: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {str(e)}",
+                text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {e.message}",
                 thread_ts=thread_ts
             )
             metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
@@ -143,7 +144,7 @@ def handle_file_shared_events(event, say, client):
             logging.error(f"Error uploading .txt to Slack: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {e}",
+                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {e.message}",
                 thread_ts=thread_ts
             )
             metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
