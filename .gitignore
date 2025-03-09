@@ -4,3 +4,4 @@
 *.sublime*
 transcription_metrics.json
 venv/
+__pycache__/

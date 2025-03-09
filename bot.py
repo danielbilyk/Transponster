@@ -6,7 +6,7 @@ from slack_events import app as slack_app, handler
 flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
-def slack_events():
+def github_redirect():
 	return redirect("https://github.com/danielbilyk/Transponster")
 
 @flask_app.route("/slack/events", methods=["POST"])
