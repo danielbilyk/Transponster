@@ -122,6 +122,39 @@ This setup allows you to test your bot locally while Slack sends events to your 
 
 ## Deployment
 
-*Deployment instructions will be added later.*
+1. **Build the Docker Image**  
+   From the project root (where `Dockerfile` is located), run:
+   ```
+   docker build -t transponster-bot .
+   ```
 
----
+2. **Create a `.env` File**
+Make sure you have a `.env` file containing:
+```
+SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
+SLACK_SIGNING_SECRET=your-slack-signing-secret
+ELEVENLABS_API_KEY=your-elevenlabs-api-key
+```
+
+3. **Run the Container**
+Map port 3000 from the container to the host, load your .env, and ensure the container restarts automatically:
+```
+docker run -d \
+  --name transponster-container \
+  --env-file .env \
+  -p 3000:3000 \
+  --restart=always \
+  transponster-bot
+```
+
+4. **Confirm It’s Running**
+- Check container logs:
+```
+docker logs -f transponster-container
+```
+- If you need a public HTTPS endpoint (for Slack), set up a reverse proxy (e.g., Apache/Nginx) pointing to port 3000.
+
+You can then configure Slack to send requests to your server’s address or domain, forwarding to port 3000 if needed.
+```
+https://your-domain.tld/slack/events
+```

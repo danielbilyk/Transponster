@@ -4,5 +4,4 @@ requests
 python-dotenv
 elevenlabs
 flask
-ssl
 certifi
