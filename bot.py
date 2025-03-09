@@ -7,6 +7,7 @@ flask_app = Flask(__name__)
 
 @flask_app.route("/", methods=["GET"])
 def github_redirect():
+	logging.info("Redirecting to GitHub")
 	return redirect("https://github.com/danielbilyk/Transponster")
 
 @flask_app.route("/slack/events", methods=["POST"])
