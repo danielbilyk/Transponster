@@ -15,6 +15,7 @@ RUN chmod +x /app/entrypoint.sh
 COPY requirements.txt /app/
 RUN pip3 install --upgrade pip
 RUN pip3 install --no-cache-dir -r requirements.txt
+RUN sh /app/entrypoint.sh
 
 # Expose the port your Flask app runs on (3000 by default)
 EXPOSE 3000
@@ -23,5 +24,4 @@ EXPOSE 3000
 ENV PYTHONUNBUFFERED=1
 
 # Start the bot
-ENTRYPOINT ["/app/entrypoint.sh"]
 CMD ["python", "bot.py"]
