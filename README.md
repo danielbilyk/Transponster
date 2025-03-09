@@ -158,3 +158,4 @@ You can then configure Slack to send requests to your server’s address or doma
 ```
 https://your-domain.tld/slack/events
 ```
+.

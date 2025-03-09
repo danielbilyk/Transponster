@@ -21,3 +21,4 @@ file_handler.setLevel(logging.INFO)
 file_formatter = logging.Formatter(LOG_FORMAT)
 file_handler.setFormatter(file_formatter)
 logger.addHandler(file_handler)
+.

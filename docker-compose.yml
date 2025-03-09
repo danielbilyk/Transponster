@@ -9,3 +9,4 @@ services:
     volumes:
       - /apps/Transponster/bot.log:/app/bot.log
       - /apps/Transponster/transcription_metrics.json:/app/transcription_metrics.json
+.

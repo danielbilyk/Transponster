@@ -26,3 +26,4 @@ ENV PYTHONUNBUFFERED=1
 
 # Start the bot
 CMD ["gunicorn", "-b", "0.0.0.0:3000", "bot:flask_app"]
+.

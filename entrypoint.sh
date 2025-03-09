@@ -30,3 +30,4 @@ if [ ! -f /app/bot.log ]; then
 fi
 
 exec "$@"
+.

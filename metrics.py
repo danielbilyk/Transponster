@@ -77,3 +77,4 @@ class MetricsManager:
             self.metrics["average_processing_time_seconds"]["count"] += 1
 
         self.save_metrics()
+.        
