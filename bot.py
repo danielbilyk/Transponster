@@ -16,5 +16,4 @@ def slack_events():
 
 if __name__ == "__main__":
 	logging.info("Starting Flask server on port 3000")
-	flask_app.run(host="0.0.0.0", port=3000)
-.	
+	flask_app.run(host="0.0.0.0", port=3000)	

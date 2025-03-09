@@ -76,5 +76,4 @@ class MetricsManager:
             self.metrics["average_processing_time_seconds"]["total_time"] += processing_time
             self.metrics["average_processing_time_seconds"]["count"] += 1
 
-        self.save_metrics()
-.        
+        self.save_metrics()        

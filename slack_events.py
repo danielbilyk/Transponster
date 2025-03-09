@@ -162,5 +162,4 @@ def handle_file_shared_events(event, say, client):
         if 'file_info' in locals():
             txt_file_path_to_clean = f"/tmp/{file_info['name'].split('.')[0]}.txt"
             if os.path.exists(txt_file_path_to_clean):
-                cleanup_temp_file(txt_file_path_to_clean)
-.                
+                cleanup_temp_file(txt_file_path_to_clean)                
