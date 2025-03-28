@@ -115,4 +115,4 @@ def get_thread_ts(file_info, channel_id):
         thread_ts = shares["public"][channel_id][0].get("ts")
     elif "private" in shares and channel_id in shares["private"]:
         thread_ts = shares["private"][channel_id][0].get("ts")
-    return thread_ts    
+    return thread_ts

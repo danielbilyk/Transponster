@@ -16,6 +16,7 @@ from helpers import (
 
 # Initialize MetricsManager and Slack app
 metrics_manager = MetricsManager(METRICS_FILE)
+
 app = App(
     token=SLACK_BOT_TOKEN,
     signing_secret=SLACK_SIGNING_SECRET
@@ -45,6 +46,11 @@ def handle_file_shared_events(event, say, client):
         logging.info("1: Retrieving file info.")
         file_info = client.files_info(file=file_id)["file"]
         logging.info(f"File info: {file_info}")
+
+        # Skip Canvas files (type 'quip')
+        if file_info['filetype'] == 'quip':
+            logging.info(f"Ignoring Canvas file: {file_info['title']}")
+            return  # Skip processing for Canvas files
 
         # Get file duration in seconds
         file_duration_seconds = get_file_duration_seconds(file_info)
@@ -162,4 +168,4 @@ def handle_file_shared_events(event, say, client):
         if 'file_info' in locals():
             txt_file_path_to_clean = f"/tmp/{file_info['name'].split('.')[0]}.txt"
             if os.path.exists(txt_file_path_to_clean):
-                cleanup_temp_file(txt_file_path_to_clean)                
+                cleanup_temp_file(txt_file_path_to_clean)
