@@ -1,6 +1,7 @@
 services:
   transponster:
-    image: transponster-bot
+    image: transponster-bot:latest
+    build: .
     container_name: transponster-container
     env_file: .env
     ports:
@@ -8,4 +9,3 @@ services:
     restart: always
     volumes:
       - /apps/Transponster/bot.log:/app/bot.log
-      - /apps/Transponster/transcription_metrics.json:/app/transcription_metrics.json

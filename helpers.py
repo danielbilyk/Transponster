@@ -5,17 +5,6 @@ import requests
 
 SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg"]
 
-def get_file_duration_seconds(file_info):
-    """Extract file duration in seconds from file metadata if available."""
-    duration_ms = file_info.get("duration_ms")
-    if duration_ms:
-        return duration_ms / 1000
-
-    # Fallback: estimate based on file size (1MB ~= 1 minute)
-    size_mb = file_info.get("size", 0) / 1_000_000
-    logging.info(f"No duration found, estimating {size_mb:.2f} minutes based on file size")
-    return size_mb * 60
-
 def format_timestamp(seconds):
     millis = int((seconds - int(seconds)) * 1000)
     time_str = str(datetime.timedelta(seconds=int(seconds)))

@@ -6,16 +6,16 @@ from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from config import (
     SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
-    ELEVENLABS_API_KEY, METRICS_FILE
+    ELEVENLABS_API_KEY
 )
-from metrics import MetricsManager
+# from metrics import MetricsManager
 from helpers import (
-    get_file_duration_seconds, is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
+    is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file, cleanup_temp_file
 )
 
 # Initialize MetricsManager and Slack app
-metrics_manager = MetricsManager(METRICS_FILE)
+# metrics_manager = MetricsManager(METRICS_FILE)
 
 app = App(
     token=SLACK_BOT_TOKEN,
@@ -50,22 +50,22 @@ def handle_file_shared_events(event, say, client):
         # Skip Canvas files (type 'quip')
         if file_info['filetype'] == 'quip':
             logging.info(f"Ignoring Canvas file: {file_info['title']}")
-            return  # Skip processing for Canvas files
-
-        # Get file duration in seconds
-        file_duration_seconds = get_file_duration_seconds(file_info)
-        logging.info(f"File duration: {file_duration_seconds:.2f} seconds")
+            return
 
         thread_ts = get_thread_ts(file_info, channel_id)
         logging.info(f"Derived thread_ts={thread_ts}")
 
-        # Validate file type
         logging.info("2: Checking if file is audio/video.")
         if not is_audio_or_video(file_info):
-            extensions = "`, `".join(SUPPORTED_EXTENSIONS)
+            # Join all extensions with commas, and make sure the last one is prefixed with 'або'
+            if len(SUPPORTED_EXTENSIONS) > 1:
+                extensions = "`" + "`, `".join(SUPPORTED_EXTENSIONS[:-1]) + "` або `" + SUPPORTED_EXTENSIONS[-1] + "`"
+            else:
+                extensions = "`" + SUPPORTED_EXTENSIONS[0] + "`"
+            
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі `{extensions}`.",
+                text=f":no_good: Сорі, це не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі {extensions}.",
                 thread_ts=thread_ts
             )
             logging.info("File is not audio/video. Flow ended.")
@@ -108,10 +108,9 @@ def handle_file_shared_events(event, say, client):
             logging.error(f"Error when calling ElevenLabs: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {e.message}",
+                text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {str(e)}",
                 thread_ts=thread_ts
             )
-            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             return
 
         if response is None or response.status_code != 200:
@@ -121,7 +120,6 @@ def handle_file_shared_events(event, say, client):
                 thread_ts=thread_ts
             )
             logging.error(f"Transcription failed. Status: {response.status_code if response else 'None'}, Error: {response.text if response else 'No response'}")
-            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
             return
 
         # Process and upload transcription result
@@ -141,26 +139,16 @@ def handle_file_shared_events(event, say, client):
             )
             logging.info("Transcription .txt uploaded to Slack.")
 
-            processing_time = time.time() - start_time
-
-            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=True, processing_time=processing_time)
-            logging.info(f"Flow completed successfully in {processing_time:.2f} seconds. User metrics updated.")
-
         except Exception as e:
             logging.error(f"Error uploading .txt to Slack: {e}")
             client.chat_postMessage(
                 channel=channel_id,
-                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {e.message}",
+                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {str(e)}",
                 thread_ts=thread_ts
             )
-            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
 
     except Exception as e:
         logging.error(f"Unexpected error in handle_file_shared_events: {e}")
-        try:
-            metrics_manager.update_user_metrics(user_id, username, file_duration_seconds, success=False, processing_time=time.time() - start_time)
-        except Exception as metrics_error:
-            logging.error(f"Could not update metrics after unexpected error: {metrics_error}")
             
     finally:
         if local_file_path and os.path.exists(local_file_path):
