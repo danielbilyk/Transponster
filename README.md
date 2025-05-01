@@ -2,7 +2,7 @@
 
 _Because every PM needs a vibe-coding project that's not good enough for production but gets the job done nevertheless._
 
-This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up Slack, Elevenlabs, and then the bot itself.
+This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up [Slack](https://github.com/danielbilyk/Transponster/blob/main/README.md#-slack-setup), [ElevenLabs](https://github.com/danielbilyk/Transponster/blob/main/README.md#-elevenlabs-setup), and then [the bot itself](https://github.com/danielbilyk/Transponster/blob/main/README.md#-bot-setup).
 
 ---
 
