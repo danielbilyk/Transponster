@@ -1,13 +1,15 @@
-# Transponster
+# Transponster — Audio Transcriber Bot for Slack
 
-A Slack bot that turns audio or video into transcribed text file using ElevenLabs API.
+_Because every PM needs a vibe-coding project that's not good enough for production but gets the job done nevertheless._
+
+This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up Slack, Elevenlabs, and then the bot itself.
 
 ---
 
-## Slack Setup
+## 🧵 Slack Setup
 
 1. **Create a Slack App:**
-   - Go to [Slack API](https://api.slack.com/apps) and create a new app.
+   - Go to [Slack API](https://api.slack.com/apps) and create a new app: "Create New App" → "From scratch"
    - Select the workspace where you have permissions.
 
 2. **Configure OAuth & Permissions:**
@@ -25,8 +27,9 @@ A Slack bot that turns audio or video into transcribed text file using ElevenLab
      **User Token Scopes**
      - `files:read`
 
-   - Install the app to your workspace to obtain the **Bot User OAuth Token** (these start with `xoxb-`).
-   - In the **Basic Information** section, note your **Signing Secret**.
+   - Still under **OAuth & Permissions**, click "Install App".
+   - Then, obtain the **Bot User OAuth Token** (these start with `xoxb-`).
+   - Then, under **Basic Information** section, note your **Signing Secret**.
 
 3. **Event Subscriptions:**
    - Enable **Event Subscriptions**.
@@ -44,7 +47,7 @@ A Slack bot that turns audio or video into transcribed text file using ElevenLab
 
 ---
 
-## ElevenLabs Setup
+## 🧬 ElevenLabs Setup
 
 1. **Sign Up & API Key:**
    - Visit [ElevenLabs](https://elevenlabs.io) and create an account.
@@ -59,7 +62,7 @@ A Slack bot that turns audio or video into transcribed text file using ElevenLab
 
 ---
 
-## Bot Setup
+## 🤖 Bot Setup
 
 1. **Clone the Repository:**
 
@@ -93,9 +96,9 @@ A Slack bot that turns audio or video into transcribed text file using ElevenLab
 
 ---
 
-## Local Development
+## 🌐 Local Development
 
-When developing locally, it's often necessary to expose your local server to the internet so that Slack can send events to your bot.
+To develop locally, you need to expose your local server to the internet so that Slack can send events to your bot. I suggest using Ngrok.
 
 1. **Use Ngrok:**
    - Install [ngrok](https://ngrok.com/) if you haven't already.
@@ -120,7 +123,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
 
 ---
 
-## Deployment
+## 🐳 Deployment
 
 1. **Build the Docker Image**  
    From the project root (where `Dockerfile` is located), run:
@@ -139,6 +142,7 @@ ELEVENLABS_API_KEY=your-elevenlabs-api-key
 3. **Run the Container**
 Map port 3000 from the container to the host, load your .env, and ensure the container restarts automatically:
 ```
+docker build -t transponster-bot .
 docker run -d \
   --name transponster-container \
   --env-file .env \
