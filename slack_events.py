@@ -8,7 +8,6 @@ from config import (
     SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
     ELEVENLABS_API_KEY
 )
-# from metrics import MetricsManager
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file, cleanup_temp_file
@@ -103,9 +102,9 @@ def handle_file_shared_events(event, say, client):
         # Transcribe the file
         logging.info("5: Transcribing file with ElevenLabs.")
         try:
-            response = transcribe_file(local_file_path, ELEVENLABS_API_KEY)
+            transcription_result = transcribe_file(local_file_path)
         except Exception as e:
-            logging.error(f"Error when calling ElevenLabs: {e}")
+            logging.error(f"Error calling ElevenLabs: {e}")
             client.chat_postMessage(
                 channel=channel_id,
                 text=f":expressionless: Сорі, у мене не вийшло відправити запит до ElevenLabs: {str(e)}",
@@ -113,18 +112,8 @@ def handle_file_shared_events(event, say, client):
             )
             return
 
-        if response is None or response.status_code != 200:
-            client.chat_postMessage(
-                channel=channel_id,
-                text=":expressionless: Failed to transcribe the file.",
-                thread_ts=thread_ts
-            )
-            logging.error(f"Transcription failed. Status: {response.status_code if response else 'None'}, Error: {response.text if response else 'No response'}")
-            return
-
         # Process and upload transcription result
         logging.info("6: Processing transcription result.")
-        transcription_result = response.json()
         txt_file_path = write_transcript_file(transcription_result, file_info["name"])
         logging.info(f"Formatted transcription saved to {txt_file_path}.")
 
@@ -134,7 +123,7 @@ def handle_file_shared_events(event, say, client):
                 channel=channel_id,
                 file=txt_file_path,
                 title="Transcription",
-                initial_comment=f":heavy_check_mark: Все вийшло, осьо твоя розшифровка.",
+                initial_comment=f":heavy_check_mark: Все вийшло, ось твоя розшифровка.",
                 thread_ts=thread_ts
             )
             logging.info("Transcription .txt uploaded to Slack.")

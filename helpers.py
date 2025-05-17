@@ -2,8 +2,15 @@ import os
 import logging
 import datetime
 import requests
+from config import (
+    ELEVENLABS_STT_URL,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_MODEL_ID,
+    ELEVENLABS_TAG_AUDIO_EVENTS,
+    ELEVENLABS_DIARIZE,
+)
 
-SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg"]
+SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg", ".aac"]
 
 def format_timestamp(seconds):
     millis = int((seconds - int(seconds)) * 1000)
@@ -81,20 +88,26 @@ def file_too_large(fileinfo):
     size_bytes = fileinfo.get("size", 0)
     return size_bytes > 1000 * 1_000_000
 
-def transcribe_file(file_path, api_key):
-    
-    """Send the file to ElevenLabs for transcription."""
-    url = "https://api.elevenlabs.io/v1/speech-to-text"
-    headers = {"xi-api-key": api_key,}
-    files = {"file": open(file_path, "rb")}
+def transcribe_file(file_path: str) -> dict:
+    """
+    Send the file at `file_path` to ElevenLabs and return parsed JSON.
+    Raises on HTTP errors.
+    """
+    headers = {"xi-api-key": ELEVENLABS_API_KEY}
     data = {
-        "model_id": "scribe_v1",
-        "tag_audio_events": 'true',
-        "diarize": 'true',
+        "model_id": ELEVENLABS_MODEL_ID,
+        "tag_audio_events": ELEVENLABS_TAG_AUDIO_EVENTS,
+        "diarize": ELEVENLABS_DIARIZE,
     }
-
-    response = requests.post(url, headers=headers, files=files, data=data)
-    return response
+    with open(file_path, "rb") as fp:
+        resp = requests.post(
+            ELEVENLABS_STT_URL,
+            headers=headers,
+            files={"file": fp},
+            data=data,
+        )
+    resp.raise_for_status()
+    return resp.json()
 
 def get_thread_ts(file_info, channel_id):
     # Extract the Slack thread_ts from the file info.
