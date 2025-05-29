@@ -57,6 +57,66 @@ def create_transcript(transcription_result):
 
     return "\n".join(transcript_lines)
 
+import json
+from datetime import timedelta
+
+def _fmt_ts(seconds: float) -> str:
+    """
+    Turn a float (seconds) into “HH:MM:SS,mmm” for SRT.
+    """
+    total_ms = int(seconds * 1_000)
+    h = total_ms // 3_600_000
+    m = (total_ms % 3_600_000) // 60_000
+    s = (total_ms % 60_000) // 1_000
+    ms = total_ms % 1_000
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
+
+def create_srt_from_json(transcript_json: dict,
+                         max_chars: int = 40,
+                         max_duration: float = 4.0) -> str:
+    """
+    Build an SRT file from word-level JSON:
+     - Gather words until you hit:
+        • sentence-ending punctuation (.,!?),
+        • OR accumulated text length > max_chars,
+        • OR time span > max_duration seconds
+     - Then flush that buffer as one subtitle block.
+    Returns the full SRT as a single string.
+    """
+    segments = []
+    buf = []
+
+    for w in transcript_json.get("words", []):
+        if w["type"] != "word":
+            continue
+        buf.append(w)
+        text = " ".join([x["text"].strip() for x in buf]).strip()
+        duration = buf[-1]["end"] - buf[0]["start"]
+
+        # should we cut here?
+        ends_sentence = buf[-1]["text"].rstrip().endswith((".", "!", "?"))
+        if ends_sentence or len(text) >= max_chars or duration >= max_duration:
+            segments.append(buf)
+            buf = []
+
+    # leftover
+    if buf:
+        segments.append(buf)
+
+    # now render SRT
+    out_lines = []
+    for idx, seg in enumerate(segments, start=1):
+        start_ts = _fmt_ts(seg[0]["start"])
+        end_ts   = _fmt_ts(seg[-1]["end"])
+        line_txt = " ".join([w["text"].strip() for w in seg]).strip()
+
+        out_lines.append(str(idx))
+        out_lines.append(f"{start_ts} --> {end_ts}")
+        out_lines.append(line_txt)
+        out_lines.append("")  # blank line
+
+    return "\n".join(out_lines)
+
 def write_transcript_file(transcription_result, original_filename, output_dir="/tmp"):
     base_filename = os.path.splitext(original_filename)[0]
     txt_file_path = os.path.join(output_dir, f"{base_filename}.txt")

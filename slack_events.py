@@ -2,15 +2,20 @@ import os
 import time
 import logging
 import requests
+import json
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from config import (
-    SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET,
-    ELEVENLABS_API_KEY
+    SLACK_BOT_TOKEN,
+    SLACK_SIGNING_SECRET,
+    ELEVENLABS_API_KEY,
+    ELEVENLABS_STT_URL,
+    ELEVENLABS_MODEL_ID
 )
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
-    transcribe_file, get_thread_ts, write_transcript_file, cleanup_temp_file
+    transcribe_file, get_thread_ts, write_transcript_file,
+    cleanup_temp_file, create_srt_from_json
 )
 
 # Initialize MetricsManager and Slack app
@@ -37,6 +42,8 @@ def handle_file_shared_events(event, say, client):
     channel_id = event.get("channel_id")
     username = user_id  # Default if not found later
     local_file_path = None # Initialise to cleanup later
+    txt_file_path   = None
+    srt_file_path   = None
 
     try:
         # Get user and file info
@@ -114,35 +121,76 @@ def handle_file_shared_events(event, say, client):
 
         # Process and upload transcription result
         logging.info("6: Processing transcription result.")
-        txt_file_path = write_transcript_file(transcription_result, file_info["name"])
-        logging.info(f"Formatted transcription saved to {txt_file_path}.")
+        
+        # decide transcription mode based on filename
+        filename_lower = file_info["name"].lower()
+        if "subtitles" in filename_lower or "субтитри" in filename_lower:
+            mode = "srt_only"
+        elif "both" in filename_lower or "обидва" in filename_lower:
+            mode = "both"
+        else:
+            mode = "txt_only"
+        logging.info(f"Determined transcription mode: {mode}")
 
-        logging.info("7: Uploading .txt file to Slack.")
-        try:
-            client.files_upload_v2(
-                channel=channel_id,
-                file=txt_file_path,
-                title="Transcription",
-                initial_comment=f":heavy_check_mark: Все вийшло, ось твоя розшифровка.",
-                thread_ts=thread_ts
-            )
-            logging.info("Transcription .txt uploaded to Slack.")
+        # define base name for both files
+        base_filename = os.path.splitext(file_info["name"])[0]
 
-        except Exception as e:
-            logging.error(f"Error uploading .txt to Slack: {e}")
-            client.chat_postMessage(
-                channel=channel_id,
-                text=f":expressionless: Сорі, я не зміг завантажити сюди файл розшифровки. Помилка наступна: {str(e)}",
-                thread_ts=thread_ts
-            )
+        # 6a) If srt_only or both → hit ElevenLabs again to get raw .srt
+        if mode in ("srt_only", "both"):
+            logging.info("6a: Generating .srt file.")
+            srt_file_path = f"/tmp/{file_info['id']}_{base_filename}.srt"
+            srt_text = create_srt_from_json(transcription_result, max_chars=40, max_duration=4.0)
+            with open(srt_file_path, "w", encoding="utf-8") as f:
+                f.write(srt_text)
+            logging.info(f"SRT transcription saved to {srt_file_path}.")
 
-    except Exception as e:
-        logging.error(f"Unexpected error in handle_file_shared_events: {e}")
+        # 6b) If txt_only or both → run existing txt logic
+        if mode in ("txt_only", "both"):
+            txt_file_path = write_transcript_file(transcription_result, file_info["name"])
+            logging.info(f"Formatted transcription saved to {txt_file_path}.")
+
+        # 7: Upload results to Slack according to mode
+        if mode in ("srt_only", "both"):
+            logging.info("7a: Uploading .srt file to Slack.")
+            try:
+                client.files_upload_v2(
+                    channel=channel_id,
+                    file=srt_file_path,
+                    title=f"{base_filename}.srt",
+                    initial_comment=":heavy_check_mark: Все вийшло, ось субтитри.",
+                    thread_ts=thread_ts
+                    )
+                logging.info("SRT file uploaded to Slack.")
+
+            except Exception as e:
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=f":expressionless: Сорі, я не зміг завантажити файл субтитрів. Помилка: {e}",
+                    thread_ts=thread_ts
+                    )
+                logging.error(f"Error uploading .srt to Slack: {e}")
+
+        if mode in ("txt_only", "both"):
+            logging.info("7b: Uploading .txt file to Slack.")
+            try:
+                client.files_upload_v2(
+                    channel=channel_id,
+                    file=txt_file_path,
+                    title=f"{base_filename}.txt",
+                    initial_comment=":heavy_check_mark: Все вийшло, ось твоя розшифровка.",
+                    thread_ts=thread_ts
+                    )
+                logging.info("Transcription .txt uploaded to Slack.")
+
+            except Exception as e:
+                logging.error(f"Error in transcription flow: {e}")
+                client.chat_postMessage(
+                    channel=channel_id,
+                    text=":expressionless: Сорі, щось пішло не так з транскрипцією.",
+                    thread_ts=thread_ts
+                    )
             
     finally:
-        if local_file_path and os.path.exists(local_file_path):
-            cleanup_temp_file(local_file_path)
-        if 'file_info' in locals():
-            txt_file_path_to_clean = f"/tmp/{file_info['name'].split('.')[0]}.txt"
-            if os.path.exists(txt_file_path_to_clean):
-                cleanup_temp_file(txt_file_path_to_clean)
+        for path in (local_file_path, txt_file_path, srt_file_path):
+            if path and os.path.exists(path):
+                cleanup_temp_file(path)
