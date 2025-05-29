@@ -1,7 +1,8 @@
 import os
 import logging
-import datetime
 import requests
+import datetime
+import json
 from config import (
     ELEVENLABS_STT_URL,
     ELEVENLABS_API_KEY,
@@ -12,14 +13,16 @@ from config import (
 
 SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg", ".aac"]
 
-def format_timestamp(seconds):
-    millis = int((seconds - int(seconds)) * 1000)
-    time_str = str(datetime.timedelta(seconds=int(seconds)))
-    parts = time_str.split(':')
-    if len(parts) == 2:
-        time_str = "0:" + time_str
-    h, m, s = time_str.split(':')
-    return f"{h.zfill(2)}:{m.zfill(2)}:{s.zfill(2)},{millis:03d}"
+def format_timestamp(seconds: float) -> str:
+    """
+    Convert float-second timestamp into "HH:MM:SS,mmm".
+    """
+    total_ms = int(seconds * 1_000)
+    h = total_ms // 3_600_000
+    m = (total_ms % 3_600_000) // 60_000
+    s = (total_ms % 60_000) // 1_000
+    ms = total_ms % 1_000
+    return f"{h:02}:{m:02}:{s:02},{ms:03}"
 
 def create_transcript(transcription_result):
     words = transcription_result.get("words", [])
@@ -57,20 +60,6 @@ def create_transcript(transcription_result):
 
     return "\n".join(transcript_lines)
 
-import json
-from datetime import timedelta
-
-def _fmt_ts(seconds: float) -> str:
-    """
-    Turn a float (seconds) into “HH:MM:SS,mmm” for SRT.
-    """
-    total_ms = int(seconds * 1_000)
-    h = total_ms // 3_600_000
-    m = (total_ms % 3_600_000) // 60_000
-    s = (total_ms % 60_000) // 1_000
-    ms = total_ms % 1_000
-    return f"{h:02}:{m:02}:{s:02},{ms:03}"
-
 def create_srt_from_json(transcript_json: dict,
                          max_chars: int = 40,
                          max_duration: float = 4.0) -> str:
@@ -106,8 +95,8 @@ def create_srt_from_json(transcript_json: dict,
     # now render SRT
     out_lines = []
     for idx, seg in enumerate(segments, start=1):
-        start_ts = _fmt_ts(seg[0]["start"])
-        end_ts   = _fmt_ts(seg[-1]["end"])
+        start_ts = format_timestamp(seg[0]["start"])
+        end_ts   = format_timestamp(seg[-1]["end"])
         line_txt = " ".join([w["text"].strip() for w in seg]).strip()
 
         out_lines.append(str(idx))
@@ -148,10 +137,11 @@ def file_too_large(fileinfo):
     size_bytes = fileinfo.get("size", 0)
     return size_bytes > 1000 * 1_000_000
 
-def transcribe_file(file_path: str) -> dict:
+def transcribe_file(file_path: str, as_srt: bool = False):
     """
-    Send the file at `file_path` to ElevenLabs and return parsed JSON.
-    Raises on HTTP errors.
+    Send `file_path` to ElevenLabs.
+    - Returns JSON (dict) when as_srt=False (default).
+    - Returns raw SRT text (str) when as_srt=True.
     """
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     data = {
@@ -159,6 +149,10 @@ def transcribe_file(file_path: str) -> dict:
         "tag_audio_events": ELEVENLABS_TAG_AUDIO_EVENTS,
         "diarize": ELEVENLABS_DIARIZE,
     }
+    if as_srt:
+        # request raw SRT from the API
+        data["srt"] = json.dumps({"format": "srt"})
+
     with open(file_path, "rb") as fp:
         resp = requests.post(
             ELEVENLABS_STT_URL,
@@ -167,7 +161,8 @@ def transcribe_file(file_path: str) -> dict:
             data=data,
         )
     resp.raise_for_status()
-    return resp.json()
+
+    return resp.text if as_srt else resp.json()
 
 def get_thread_ts(file_info, channel_id):
     # Extract the Slack thread_ts from the file info.

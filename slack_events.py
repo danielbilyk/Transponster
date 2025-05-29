@@ -6,20 +6,14 @@ import json
 from slack_bolt import App
 from slack_bolt.adapter.flask import SlackRequestHandler
 from config import (
-    SLACK_BOT_TOKEN,
-    SLACK_SIGNING_SECRET,
-    ELEVENLABS_API_KEY,
-    ELEVENLABS_STT_URL,
-    ELEVENLABS_MODEL_ID
+    SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, ELEVENLABS_API_KEY,
+    ELEVENLABS_STT_URL, ELEVENLABS_MODEL_ID
 )
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file,
-    cleanup_temp_file, create_srt_from_json
+    cleanup_temp_file, create_srt_from_json, format_timestamp
 )
-
-# Initialize MetricsManager and Slack app
-# metrics_manager = MetricsManager(METRICS_FILE)
 
 app = App(
     token=SLACK_BOT_TOKEN,
@@ -135,21 +129,21 @@ def handle_file_shared_events(event, say, client):
         # define base name for both files
         base_filename = os.path.splitext(file_info["name"])[0]
 
-        # 6a) If srt_only or both → hit ElevenLabs again to get raw .srt
+        # 6a) If srt_only or both → generate srt file
         if mode in ("srt_only", "both"):
             logging.info("6a: Generating .srt file.")
-            srt_file_path = f"/tmp/{file_info['id']}_{base_filename}.srt"
+            srt_file_path = f"/tmp/{base_filename}.srt"
             srt_text = create_srt_from_json(transcription_result, max_chars=40, max_duration=4.0)
             with open(srt_file_path, "w", encoding="utf-8") as f:
                 f.write(srt_text)
             logging.info(f"SRT transcription saved to {srt_file_path}.")
 
-        # 6b) If txt_only or both → run existing txt logic
+        # 6b) If txt_only or both → generate txt file
         if mode in ("txt_only", "both"):
             txt_file_path = write_transcript_file(transcription_result, file_info["name"])
             logging.info(f"Formatted transcription saved to {txt_file_path}.")
 
-        # 7: Upload results to Slack according to mode
+        # 7: Upload file(s) to Slack according to mode
         if mode in ("srt_only", "both"):
             logging.info("7a: Uploading .srt file to Slack.")
             try:
