@@ -37,14 +37,6 @@ This is a Slack bot that turns audio or video into transcribed text file using E
    - Subscribe to the `file_shared` event.
    - Save your changes.
 
-4. **Environment Variables:**
-   - Create a `.env` file in your project root with the following (replace placeholders with your values):
-
-     ```
-     SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
-     SLACK_SIGNING_SECRET=your-slack-signing-secret
-     ```
-
 ---
 
 ## 🧬 ElevenLabs Setup
@@ -52,13 +44,6 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 1. **Sign Up & API Key:**
    - Visit [ElevenLabs](https://elevenlabs.io) and create an account.
    - Generate your API key from your dashboard.
-
-2. **Environment Variables:**
-   - In your `.env` file, add:
-
-     ```
-     ELEVENLABS_API_KEY=your-elevenlabs-api-key
-     ```
 
 ---
 
@@ -96,7 +81,7 @@ This is a Slack bot that turns audio or video into transcribed text file using E
    uvicorn bot:api --host 0.0.0.0 --port 3000
    ```
 
-   The bot should start, and you'll see logs both in your terminal and in `bot.log`.
+   The bot will start, and you'll see logs both in your terminal and in `bot.log`.
 
 ---
 
@@ -105,6 +90,7 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 To develop locally, you need to expose your local server to the internet so that Slack can send events to your bot. I suggest using Ngrok.
 
 1. Run your bot server first:
+   
    In one terminal, start the bot:
    ```
    uvicorn bot:api --host 0.0.0.0 --port 3000
@@ -112,7 +98,7 @@ To develop locally, you need to expose your local server to the internet so that
 
 2. **Use Ngrok:**
    - Install [ngrok](https://ngrok.com/) if you haven't already.
-   - Run your Flask server on port 3000 and then in a separate terminal run:
+   - In a separate terminal window, run:
    
      ```
      ngrok http 3000
@@ -136,6 +122,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
 ## 🐳 Deployment
 
 1. **Build the Docker Image**  
+   
    From the project root (where `Dockerfile` is located), run:
    ```
    docker build -t transponster-bot .
@@ -155,7 +142,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
 
 3. **Run the Container**
    
-   Map port 3000 from the container to the host, load your .env, and ensure the container restarts automatically:
+   Map port 3000 from the container to the host, load your `.env`, and ensure the container restarts automatically:
    ```
    docker run -d \
      --name transponster-container \
