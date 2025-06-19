@@ -3,6 +3,9 @@ slack_sdk
 requests
 python-dotenv
 elevenlabs
-flask
 certifi
 urllib3
+fastapi
+uvicorn
+aiohttp
+aiofiles
