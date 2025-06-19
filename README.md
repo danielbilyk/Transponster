@@ -81,15 +81,19 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 
 3. **Configure Environment Variables:**
    - Ensure your `.env` file includes:
-     - `SLACK_BOT_TOKEN`
-     - `SLACK_SIGNING_SECRET`
-     - `ELEVENLABS_API_KEY`
-     - Optionally, `METRICS_FILE` (defaults to `transcription_metrics.json`)
+   ```
+   SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
+   SLACK_SIGNING_SECRET=your-slack-signing-secret
+   ELEVENLABS_API_KEY=your-elevenlabs-api-key
+
+   # Optional: Set a channel for the bot to post a startup message
+   SLACK_STARTUP_CHANNEL=C0XXXXXXX
+   ```
 
 4. **Run the Bot:**
 
    ```
-   python bot.py
+   uvicorn bot:api --host 0.0.0.0 --port 3000
    ```
 
    The bot should start, and you'll see logs both in your terminal and in `bot.log`.
@@ -100,7 +104,13 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 
 To develop locally, you need to expose your local server to the internet so that Slack can send events to your bot. I suggest using Ngrok.
 
-1. **Use Ngrok:**
+1. Run your bot server first:
+   In one terminal, start the bot:
+   ```
+   uvicorn bot:api --host 0.0.0.0 --port 3000
+   ```
+
+2. **Use Ngrok:**
    - Install [ngrok](https://ngrok.com/) if you haven't already.
    - Run your Flask server on port 3000 and then in a separate terminal run:
    
@@ -110,7 +120,7 @@ To develop locally, you need to expose your local server to the internet so that
      
    - Ngrok will provide you with a public URL (e.g., `https://xxxxxxxx.ngrok.io`).
 
-2. **Configure Slack Event Subscriptions:**
+3. **Configure Slack Event Subscriptions:**
    - In Slack's Event Subscriptions settings, set the Request URL to:
      
      ```
@@ -137,16 +147,19 @@ Make sure you have a `.env` file containing:
 SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
 SLACK_SIGNING_SECRET=your-slack-signing-secret
 ELEVENLABS_API_KEY=your-elevenlabs-api-key
+
+# Optional: Set a channel for the bot to post a startup message
+SLACK_STARTUP_CHANNEL=yor-slack-startup-channel
 ```
 
 3. **Run the Container**
 Map port 3000 from the container to the host, load your .env, and ensure the container restarts automatically:
 ```
-docker build -t transponster-bot .
 docker run -d \
   --name transponster-container \
   --env-file .env \
   -p 3000:3000 \
+  -v /path/on/host/bot.log:/app/bot.log \
   --restart=always \
   transponster-bot
 ```
