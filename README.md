@@ -142,6 +142,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
    ```
 
 2. **Create a `.env` File**
+   
    Make sure you have a `.env` file containing:
    ```
    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
@@ -153,6 +154,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
    ```
 
 3. **Run the Container**
+   
    Map port 3000 from the container to the host, load your .env, and ensure the container restarts automatically:
    ```
    docker run -d \
