@@ -8,6 +8,4 @@ services:
       - "3000:3000"
     restart: always
     volumes:
-      # - ./bot.log:/app/bot.log
-      # For server deployment, use:
-      - /apps/Transponster/bot.log:/app/bot.log
+      - ./logs:/app/logs
