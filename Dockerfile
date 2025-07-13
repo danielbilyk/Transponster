@@ -4,6 +4,9 @@ FROM python:3.12-slim
 # Create a non-root user
 RUN groupadd --system app && useradd --system --gid app app
 
+# Create logs directory and set permissions
+RUN mkdir -p /app/logs && chown app:app /app/logs
+
 # Create a directory for the app
 WORKDIR /app
 
