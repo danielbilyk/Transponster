@@ -7,9 +7,6 @@ RUN groupadd --system app && useradd --system --gid app app
 # Create a directory for the app
 WORKDIR /app
 
-# Create logs directory and set permissions
-RUN mkdir -p /app/logs && chown app:app /app/logs
-
 # Copy requirements and install dependencies as root
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip
