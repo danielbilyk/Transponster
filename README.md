@@ -2,7 +2,7 @@
 
 _Because every PM needs a vibe-coding project that's not good enough for production but gets the job done nevertheless._
 
-This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up [Slack](https://github.com/danielbilyk/Transponster/blob/main/README.md#-slack-setup), [ElevenLabs](https://github.com/danielbilyk/Transponster/blob/main/README.md#-elevenlabs-setup), and then [the bot itself](https://github.com/danielbilyk/Transponster/blob/main/README.md#-bot-setup).
+This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up [Slack](#-slack-setup), [ElevenLabs](#-elevenlabs-setup), [Google Drive](#-google-drive-integration), and then [the bot itself](#-bot-setup).
 
 ---
 
@@ -47,6 +47,38 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 
 ---
 
+## ☁️ Google Drive Integration
+
+Transponster can automatically upload your transcripts as Word documents (.docx) to a shared Google Drive. Each user gets their own folder inside the shared drive, and every transcript is saved there for easy access and sharing.
+
+### What the bot does with Google Drive:
+- Creates a shared drive (if not already present) named `Transponster`.
+- Creates a personal folder for each Slack user (by display name) inside the shared drive.
+- Uploads every transcript as a `.docx` file to your folder, so you can always find your files in Drive.
+- Shares a direct link to the file and your folder in Slack after processing.
+
+### Google Cloud Setup
+1. **Create a Google Cloud Project & Service Account:**
+   - Go to [Google Cloud Console](https://console.cloud.google.com/).
+   - Create a new project (or use an existing one).
+   - Enable the **Google Drive API** for your project.
+   - Create a **Service Account** with the `Editor` role (or at least permission to manage files in Drive).
+   - Generate a **JSON key** for the service account and download it.
+
+2. **Share the Shared Drive with the Service Account:**
+   - In Google Drive, create a shared drive named `Transponster` (or use an existing one).
+   - Share the drive with your service account's email (found in the JSON key) and give it full access.
+
+3. **Set Up the Environment Variable:**
+   - Copy the entire contents of your service account JSON key.
+   - In your `.env` file, add:
+     ```
+     GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
+     ```
+     (Paste the JSON as a single line, escaping quotes as needed.)
+
+---
+
 ## 🤖 Bot Setup
 
 1. **Clone the Repository:**
@@ -70,6 +102,7 @@ This is a Slack bot that turns audio or video into transcribed text file using E
    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
    SLACK_SIGNING_SECRET=your-slack-signing-secret
    ELEVENLABS_API_KEY=your-elevenlabs-api-key
+   GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 
    # Optional: Set a channel for the bot to post a startup message
    SLACK_STARTUP_CHANNEL=C0XXXXXXX
@@ -135,6 +168,7 @@ This setup allows you to test your bot locally while Slack sends events to your 
    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
    SLACK_SIGNING_SECRET=your-slack-signing-secret
    ELEVENLABS_API_KEY=your-elevenlabs-api-key
+   GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 
    # Optional: Set a channel for the bot to post a startup message
    SLACK_STARTUP_CHANNEL=yor-slack-startup-channel

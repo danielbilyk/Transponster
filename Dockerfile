@@ -1,23 +1,24 @@
 # Use an official Python runtime as a parent image
 FROM python:3.12-slim
 
+# Create a non-root user
+RUN groupadd --system app && useradd --system --gid app app
+
 # Create a directory for the app
 WORKDIR /app
 
-# Copy the rest of your bot’s code
-COPY . /app
-
-# Copy the entrypoint script and make it executable
-COPY entrypoint.sh /app/entrypoint.sh
-RUN chmod +x /app/entrypoint.sh
-
-# Copy the requirements and install them
-COPY requirements.txt /app/
-RUN pip3 install --upgrade pip
+# Copy requirements and install dependencies as root
+COPY requirements.txt .
+RUN pip install --no-cache-dir --upgrade pip
 RUN pip install --no-cache-dir -r requirements.txt
-RUN sh /app/entrypoint.sh
 
-# Expose the port your Flask app runs on (3000 by default)
+# Switch to non-root user for security
+USER app
+
+# Copy the rest of your bot's code
+COPY --chown=app:app . .
+
+# Expose the port your app runs on
 EXPOSE 3000
 
 # Set environment variables for Python
