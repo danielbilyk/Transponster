@@ -4,6 +4,7 @@ import logging
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+import requests
 
 import aiohttp
 import aiofiles
@@ -28,14 +29,21 @@ aiohttp_session = None
 batch_lock = asyncio.Lock()
 upload_batch_tasks = {}
 BATCH_WINDOW_SECONDS = 3.0
+MAX_TRANSCRIPTION_RETRIES = 2
+RETRY_DELAY_SECONDS = 3
 
-# --- Ukrainian Pluralization Helper ---
+# --- Helper Functions ---
 def get_file_word(count: int) -> str:
+    """Ukrainian pluralization for 'file'."""
     if count % 10 == 1 and count % 100 != 11:
         return "файл"
     if 2 <= count % 10 <= 4 and (count % 100 < 10 or count % 100 >= 20):
         return "файли"
     return "файлів"
+
+def is_text_file(filename: str) -> bool:
+    """Check if file is a text/markdown file that shouldn't be transcribed."""
+    return filename.lower().endswith((".txt", ".md"))
 
 async def get_aiohttp_session():
     global aiohttp_session
@@ -94,7 +102,7 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                 if drive_service:
                     user_info = await client.users_info(user=user_id)
                     username = user_info['user']['profile']['display_name'] or user_info['user']['name']
-                    logging.info(f"[{file_info['id']}] Found user '{username}' ({user_id})")
+                    logging.info(f"[{file_info['id']}] Found user {user_id}")
                     shared_drive_id = get_or_create_shared_drive(drive_service)
                     if shared_drive_id:
                         user_folder_id, user_folder_link, created = find_or_create_folder(drive_service, username, parent_id=shared_drive_id)
@@ -166,10 +174,14 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             logging.info(f"[{file_id}] Ignoring Canvas file: {file_info.get('title')}")
             return
         
+        if is_text_file(file_info.get("name", "")):
+            logging.info(f"[{file_id}] Ignoring text/markdown file: {file_info['name']}")
+            return
+        
         logging.info(f"[{file_id}] 2: Checking if file is audio/video.")
         if not is_audio_or_video(file_info):
             extensions = "`" + "`, `".join(SUPPORTED_EXTENSIONS[:-1]) + "` або `" + SUPPORTED_EXTENSIONS[-1] + "`" if len(SUPPORTED_EXTENSIONS) > 1 else f"`{SUPPORTED_EXTENSIONS[0]}`"
-            await client.chat_postMessage(channel=channel_id, text=f":no_good: Сорі, файл `{file_info['name']}` не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі ({extensions}).", thread_ts=thread_ts)
+            await client.chat_postMessage(channel=channel_id, text=f":no_good: Сорі, файл `{file_info['name']}` не аудіо і не відео. Таке я тобі не розшифрую. Будь ласка, дай мені файл у форматі {extensions}.", thread_ts=thread_ts)
             return
 
         logging.info(f"[{file_id}] 3: Checking if file is too large (>1000 MB).")
@@ -185,7 +197,37 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             await download_file_streamed(file_info["url_private"], local_file_path, client.token)
             
             logging.info(f"[{file_id}] 5: Transcribing in background thread.")
-            transcription_result = await run_transcription(local_file_path)
+            
+            transcription_result = None
+            for attempt in range(MAX_TRANSCRIPTION_RETRIES):
+                try:
+                    transcription_result = await run_transcription(local_file_path)
+                    break  # Success
+                except requests.exceptions.HTTPError as e:
+                    if e.response is not None and 500 <= e.response.status_code < 600:
+                        file_name = file_info.get("name", file_id)
+                        if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
+                            logging.warning(f"Attempt {attempt + 1} failed for {file_name}: {e}. Retrying...")
+                            error_message = (
+                                f"😑 Сорі, щось пішло не так з файлом `{file_name}`. Помилка:\n\n"
+                                f"```{e}```\n"
+                                f"Я спробую ще раз і відпішу тобі."
+                            )
+                            await client.chat_postMessage(channel=channel_id, text=error_message, thread_ts=thread_ts)
+                            await asyncio.sleep(RETRY_DELAY_SECONDS)
+                        else:
+                            logging.error(f"All retries failed for {file_name}: {e}.")
+                            final_error_message = (
+                                f":pensive: Сорі, я все одно не зміг обробити `{file_name}`.\n\n"
+                                f"<@{user_id}>, подивись у чому проблема, як матимеш можливість.")
+                            await client.chat_postMessage(channel=channel_id, text=final_error_message, thread_ts=thread_ts)
+                            return
+                    else:
+                        raise  # Re-raise other HTTP errors to be caught by the generic handler
+            
+            if transcription_result is None:
+                logging.error(f"[{file_id}] Transcription failed after all retries, but no result was produced.")
+                return
 
             logging.info(f"[{file_id}] 6: Processing transcription result.")
             filename_lower = file_info["name"].lower()
@@ -220,7 +262,23 @@ async def process_batch_async(batch_key: tuple, client):
     thread_ts = batch_task_info["thread_ts"]
     user_id, channel_id = batch_key
     
-    file_count = len(final_file_ids)
+    processable_file_ids = []
+    for file_id in final_file_ids:
+        try:
+            file_info = (await client.files_info(file=file_id))["file"]
+            filename = file_info.get("name", "")
+            if not is_text_file(filename):
+                processable_file_ids.append(file_id)
+            else:
+                logging.info(f"[{file_id}] Ignoring text/markdown file in batch pre-check: {file_info['name']}")
+        except Exception as e:
+            logging.error(f"Could not get file_info for {file_id} during batch processing: {e}. Skipping.")
+
+    if not processable_file_ids:
+        logging.info(f"Batch for {batch_key} contained no processable files. Aborting.")
+        return
+    
+    file_count = len(processable_file_ids)
     file_word = get_file_word(file_count)
     confirmation_text = f":saluting_face: Забираю в роботу {file_count} {file_word}. Відпишу тобі по кожному окремо, коли я буду готовий, або якщо поламаюся." if file_count > 1 else ":saluting_face: Забираю в роботу. Відпишу тобі, коли я буду готовий, або якщо поламаюся."
 
@@ -230,7 +288,7 @@ async def process_batch_async(batch_key: tuple, client):
     batch_context = {'gdrive_links': []} if file_count > 1 else None
     processing_tasks = [
         process_single_file(file_id, user_id, channel_id, thread_ts, client, batch_context=batch_context)
-        for file_id in final_file_ids
+        for file_id in processable_file_ids
     ]
     await asyncio.gather(*processing_tasks)
 
