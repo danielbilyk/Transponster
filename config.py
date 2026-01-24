@@ -15,3 +15,7 @@ ELEVENLABS_TAG_AUDIO_EVENTS = os.getenv("ELEVENLABS_TAG_AUDIO_EVENTS", "true")
 ELEVENLABS_DIARIZE = os.getenv("ELEVENLABS_DIARIZE", "true")
 GOOGLE_APPLICATION_CREDENTIALS = os.getenv("GOOGLE_APPLICATION_CREDENTIALS")
 GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
+
+# Debug mode: disables Google Drive by default (use DEBUG_GDRIVE=true to re-enable)
+DEBUG = os.getenv("DEBUG", "false").lower() == "true"
+DEBUG_GDRIVE = os.getenv("DEBUG_GDRIVE", "false").lower() == "true"

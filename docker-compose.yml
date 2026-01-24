@@ -7,6 +7,10 @@ services:
     ports:
       - "3000:3000"
     restart: always
+    environment:
+      - TRACKER_DATA_DIR=/app/data
+    volumes:
+      - ./data:/app/data
     logging:
       driver: "json-file"
       options:

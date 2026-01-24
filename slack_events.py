@@ -10,7 +10,7 @@ import aiohttp
 import aiofiles
 from slack_bolt.async_app import AsyncApp
 
-from config import SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET
+from config import SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEBUG, DEBUG_GDRIVE
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, write_transcript_file,
@@ -28,6 +28,7 @@ app = AsyncApp(
 aiohttp_session = None
 batch_lock = asyncio.Lock()
 upload_batch_tasks = {}
+processed_file_ids = set()  # Track files that have been processed to prevent duplicates
 BATCH_WINDOW_SECONDS = 3.0
 MAX_TRANSCRIPTION_RETRIES = 2
 RETRY_DELAY_SECONDS = 3
@@ -95,45 +96,50 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
             drive_message_task = None
             doc_link = None
             user_folder_link = None
-            try:
-                logging.info(f"[{file_info['id']}] 7b-gdrive: Attempting Google Drive upload.")
-                drive_service = get_google_drive_service()
-                
-                if drive_service:
-                    user_info = await client.users_info(user=user_id)
-                    username = user_info['user']['profile']['display_name'] or user_info['user']['name']
-                    logging.info(f"[{file_info['id']}] Found user {user_id}")
-                    shared_drive_id = get_or_create_shared_drive(drive_service)
-                    if shared_drive_id:
-                        user_folder_id, user_folder_link, created = find_or_create_folder(drive_service, username, parent_id=shared_drive_id)
-                        if user_folder_id:
-                            # Remove .txt or .docx from base_filename for Google Drive doc
-                            doc_base_filename = base_filename
-                            if doc_base_filename.lower().endswith('.txt'):
-                                doc_base_filename = doc_base_filename[:-4]
-                            if doc_base_filename.lower().endswith('.docx'):
-                                doc_base_filename = doc_base_filename[:-5]
-                            doc_link = upload_as_google_doc(drive_service, doc_base_filename, transcript_content, user_folder_id)
-                            if doc_link:
-                                if batch_context is not None:
-                                    batch_context['gdrive_links'].append((file_info['name'], doc_link, user_folder_link))
-                                else:
-                                    if created:
-                                        message = f"📂 Я створив для тебе <{user_folder_link}|папку> у нас на Google Drive і поклав розшифровку туди. <{doc_link}|Ось твоє посилання на файл>."
+
+            # Skip Google Drive in debug mode unless explicitly enabled
+            if DEBUG and not DEBUG_GDRIVE:
+                logging.info(f"[{file_info['id']}] Skipping Google Drive upload (debug mode)")
+            else:
+                try:
+                    logging.info(f"[{file_info['id']}] 7b-gdrive: Attempting Google Drive upload.")
+                    drive_service = get_google_drive_service()
+
+                    if drive_service:
+                        user_info = await client.users_info(user=user_id)
+                        username = user_info['user']['profile']['display_name'] or user_info['user']['name']
+                        logging.info(f"[{file_info['id']}] Found user {user_id}")
+                        shared_drive_id = get_or_create_shared_drive(drive_service)
+                        if shared_drive_id:
+                            user_folder_id, user_folder_link, created = find_or_create_folder(drive_service, username, parent_id=shared_drive_id)
+                            if user_folder_id:
+                                # Remove .txt or .docx from base_filename for Google Drive doc
+                                doc_base_filename = base_filename
+                                if doc_base_filename.lower().endswith('.txt'):
+                                    doc_base_filename = doc_base_filename[:-4]
+                                if doc_base_filename.lower().endswith('.docx'):
+                                    doc_base_filename = doc_base_filename[:-5]
+                                doc_link = upload_as_google_doc(drive_service, doc_base_filename, transcript_content, user_folder_id)
+                                if doc_link:
+                                    if batch_context is not None:
+                                        batch_context['gdrive_links'].append((file_info['name'], doc_link, user_folder_link))
                                     else:
-                                        message = f"📂 Цю розшифровку ти також знайдеш в <{user_folder_link}|оцій папці> як Word документ. <{doc_link}|Ось твоє посилання на файл>."
+                                        if created:
+                                            message = f"📂 Я створив для тебе <{user_folder_link}|папку> у нас на Google Drive і поклав розшифровку туди. <{doc_link}|Ось твоє посилання на файл>."
+                                        else:
+                                            message = f"📂 Цю розшифровку ти також знайдеш в <{user_folder_link}|оцій папці> як Word документ. <{doc_link}|Ось твоє посилання на файл>."
                                     drive_message_task = client.chat_postMessage(channel=channel_id, text=message, thread_ts=thread_ts)
                                     logging.info(f"[{file_info['id']}] 7b-gdrive: Successfully created text file and prepared Slack message.")
+                                else:
+                                    raise Exception("Failed to create text file.")
                             else:
-                                raise Exception("Failed to create text file.")
+                                raise Exception("Failed to find or create user folder.")
                         else:
-                            raise Exception("Failed to find or create user folder.")
+                            raise Exception("Failed to find Transponster shared drive.")
                     else:
-                        raise Exception("Failed to find Transponster shared drive.")
-                else:
-                    raise Exception("Failed to get Google Drive service.")
-            except Exception as e:
-                logging.error(f"[{file_info['id']}] Google Drive integration failed: {e}. Continuing with Slack upload only.")
+                        raise Exception("Failed to get Google Drive service.")
+                except Exception as e:
+                    logging.error(f"[{file_info['id']}] Google Drive integration failed: {e}. Continuing with Slack upload only.")
             
             txt_path = Path(tempfile.gettempdir()) / f"{base_filename}.txt"
             async with aiofiles.open(txt_path, "w", encoding="utf-8") as f:
@@ -258,10 +264,13 @@ async def process_batch_async(batch_key: tuple, client):
             return
         batch_task_info = upload_batch_tasks.pop(batch_key)
         
-    final_file_ids = batch_task_info["file_ids"]
+    final_file_ids = list(dict.fromkeys(batch_task_info["file_ids"]))  # Deduplicate while preserving order
     thread_ts = batch_task_info["thread_ts"]
     user_id, channel_id = batch_key
-    
+
+    # Mark files as processed to prevent duplicate events from triggering reprocessing
+    processed_file_ids.update(final_file_ids)
+
     processable_file_ids = []
     for file_id in final_file_ids:
         try:
@@ -309,6 +318,11 @@ async def handle_file_shared_events(event, client):
 
     if not channel_id:
         logging.warning(f"File {file_id} shared without channel_id. Ignoring.")
+        return
+
+    # Skip files that have already been processed
+    if file_id in processed_file_ids:
+        logging.info(f"File {file_id} already processed. Skipping duplicate event.")
         return
 
     batch_key = (user_id, channel_id)

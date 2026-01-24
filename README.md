@@ -106,6 +106,11 @@ Transponster can automatically upload your transcripts as Word documents (.docx)
 
    # Optional: Set a channel for the bot to post a startup message
    SLACK_STARTUP_CHANNEL=C0XXXXXXX
+
+   # Optional: Enable debug mode (disables Google Drive uploads by default)
+   DEBUG=true
+   # Optional: Re-enable Google Drive in debug mode
+   DEBUG_GDRIVE=true
    ```
 
 4. **Run the Bot:**
