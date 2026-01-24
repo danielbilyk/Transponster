@@ -4,6 +4,7 @@ import requests
 import datetime
 import json
 import time
+import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -21,6 +22,28 @@ from config import (
 )
 
 SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg", ".aac"]
+
+def replace_quotes_with_ukrainian(text: str) -> str:
+    """
+    Replace all double quote variations with Ukrainian quotation marks « and ».
+    Alternates between opening « and closing » quotes.
+    Leaves single quotes (apostrophes) untouched.
+    """
+    # Pattern to match all variations of double quotes
+    # This includes: " (straight), " (left double), " (right double), and similar
+    quote_pattern = r'[""\u201C\u201D\u201E\u201F\u2033\u2036]'
+
+    opening = True
+    def replace_quote(match):
+        nonlocal opening
+        if opening:
+            opening = False
+            return '«'
+        else:
+            opening = True
+            return '»'
+
+    return re.sub(quote_pattern, replace_quote, text)
 
 def format_timestamp(seconds: float) -> str:
     """
@@ -62,6 +85,7 @@ def create_transcript(transcription_result):
         start_formatted = format_timestamp(start_time)
         end_formatted = format_timestamp(end_time)
         segment_text = ''.join(word["text"] for word in seg_words)
+        segment_text = replace_quotes_with_ukrainian(segment_text)
         transcript_lines.append(f"{start_formatted} --> {end_formatted} - [{speaker}]")
         transcript_lines.append("")
         transcript_lines.append(segment_text)
@@ -113,7 +137,10 @@ def create_srt_from_json(transcript_json: dict,
         out_lines.append(line_txt)
         out_lines.append("")  # blank line
 
-    return "\n".join(out_lines)
+    # Apply quote replacement to the entire SRT content after assembly
+    # This ensures quotes spanning multiple segments are handled correctly
+    full_srt = "\n".join(out_lines)
+    return replace_quotes_with_ukrainian(full_srt)
 
 def write_transcript_file(transcription_result, original_filename, output_dir="/tmp"):
     base_filename = os.path.splitext(original_filename)[0]
@@ -279,7 +306,10 @@ def upload_as_google_doc(service, file_name, file_content, folder_id):
         from docx import Document
         from docx.shared import Pt
         from docx.oxml.ns import qn
-        
+
+        # Replace quotes before creating the document
+        file_content = replace_quotes_with_ukrainian(file_content)
+
         # Create a Word document
         doc = Document()
         p = doc.add_paragraph(file_content)
