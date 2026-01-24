@@ -1,15 +1,9 @@
 slack_bolt
-slack_sdk
 requests
 python-dotenv
-elevenlabs
-certifi
-urllib3
 fastapi
 uvicorn
 aiohttp
 aiofiles
 google-api-python-client
-google-auth-httplib2
-google-auth-oauthlib
 python-docx
