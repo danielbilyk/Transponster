@@ -3,6 +3,7 @@ import logging
 import requests
 import json
 import re
+import asyncio
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
@@ -391,10 +392,115 @@ def parse_srt_content(srt_text: str) -> list[dict]:
     return entries
 
 
+TRANSLATION_BATCH_SIZE = 20
+TRANSLATION_MAX_CONCURRENT = 8
+
+
+def _make_translation_schema(n: int) -> dict:
+    """Generate a JSON schema that enforces exactly n translated items."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "translation_response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "translated": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": n,
+                        "maxItems": n
+                    }
+                },
+                "required": ["translated"],
+                "additionalProperties": False
+            }
+        }
+    }
+
+
+TRANSLATION_SYSTEM_PROMPT = """You are a subtitle translator. You will receive a JSON array of subtitle lines.
+
+CRITICAL RULES:
+1. Translate each line to English
+2. Return EXACTLY the same number of items as you receive
+3. NEVER merge lines together - each input line must produce exactly one output line
+4. NEVER split lines - one input = one output
+5. Preserve the order exactly
+
+If a line is just a word like "Yes" or "No", translate it as a single word. Do not combine with adjacent lines."""
+
+
+async def _translate_single_line(client, text: str) -> str:
+    """Translate a single line - used as fallback."""
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "You are a translator. Translate the user's text to English. Output ONLY the translation, nothing else."},
+            {"role": "user", "content": text}
+        ],
+        temperature=0
+    )
+    return response.choices[0].message.content.strip()
+
+
+TRANSLATION_BATCH_TIMEOUT = 30  # seconds
+
+
+async def _translate_batch(client, batch: list[str], batch_num: int, total_batches: int) -> list[str]:
+    """
+    Translate a batch of lines using structured outputs with length constraints.
+    Returns translated lines, falling back to line-by-line if validation fails.
+    """
+    n = len(batch)
+    schema = _make_translation_schema(n)
+
+    for attempt in range(2):  # Try twice before fallback
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": TRANSLATION_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps(batch)}
+                    ],
+                    response_format=schema,
+                    temperature=0
+                ),
+                timeout=TRANSLATION_BATCH_TIMEOUT
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            translated = result.get("translated", [])
+
+            # Validate length matches (should always pass with minItems/maxItems, but safety check)
+            if len(translated) == n:
+                logging.info(f"[translation] Batch {batch_num}/{total_batches} OK ({n} lines)")
+                return translated
+            else:
+                logging.warning(f"[translation] Batch {batch_num}/{total_batches} length mismatch: expected {n}, got {len(translated)} (attempt {attempt + 1})")
+
+        except asyncio.TimeoutError:
+            logging.warning(f"[translation] Batch {batch_num}/{total_batches} timeout after {TRANSLATION_BATCH_TIMEOUT}s (attempt {attempt + 1})")
+
+        except Exception as e:
+            logging.warning(f"[translation] Batch {batch_num}/{total_batches} error (attempt {attempt + 1}): {e}")
+
+    # Fallback to line-by-line for this batch
+    logging.info(f"[translation] Batch {batch_num}/{total_batches} falling back to line-by-line ({n} lines)")
+    fallback_results = []
+    for text in batch:
+        translated = await _translate_single_line(client, text)
+        fallback_results.append(translated)
+    return fallback_results
+
+
 async def translate_texts_with_openai(texts: list[str]) -> list[str]:
     """
     Translate a list of texts to English using OpenAI API.
-    Each line is translated individually.
+    Uses batched requests with structured outputs for efficiency.
+    Falls back to line-by-line translation if a batch fails validation.
     Returns a list of translated texts in the same order.
     """
     if not OPENAI_API_KEY:
@@ -404,23 +510,28 @@ async def translate_texts_with_openai(texts: list[str]) -> list[str]:
         return []
 
     client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+    # Split into batches
+    batches = [texts[i:i + TRANSLATION_BATCH_SIZE] for i in range(0, len(texts), TRANSLATION_BATCH_SIZE)]
+    total_batches = len(batches)
+
+    logging.info(f"[translation] Starting translation of {len(texts)} lines in {total_batches} batches")
+
+    # Process batches with controlled concurrency
+    semaphore = asyncio.Semaphore(TRANSLATION_MAX_CONCURRENT)
+
+    async def process_with_semaphore(batch, batch_num):
+        async with semaphore:
+            return await _translate_batch(client, batch, batch_num, total_batches)
+
+    # Run all batches concurrently (limited by semaphore)
+    tasks = [process_with_semaphore(batch, i + 1) for i, batch in enumerate(batches)]
+    batch_results = await asyncio.gather(*tasks)
+
+    # Flatten results
     translations = []
-
-    for i, text in enumerate(texts):
-        response = await client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[
-                {"role": "system", "content": "You are a translator. Translate the user's text to English. Output ONLY the translation, nothing else."},
-                {"role": "user", "content": text}
-            ],
-            temperature=0.1
-        )
-
-        translated = response.choices[0].message.content.strip()
-        translations.append(translated)
-
-        if (i + 1) % 50 == 0:
-            logging.info(f"[translation] Translated {i + 1}/{len(texts)} lines")
+    for result in batch_results:
+        translations.extend(result)
 
     logging.info(f"[translation] Completed translating {len(texts)} lines")
     return translations
