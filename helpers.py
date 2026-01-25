@@ -1,15 +1,15 @@
 import os
 import logging
 import requests
-import datetime
 import json
-import time
 import re
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaFileUpload
 from googleapiclient.errors import HttpError
+
+from openai import AsyncOpenAI
 
 from config import (
     ELEVENLABS_STT_URL,
@@ -18,7 +18,8 @@ from config import (
     ELEVENLABS_TAG_AUDIO_EVENTS,
     ELEVENLABS_DIARIZE,
     GOOGLE_APPLICATION_CREDENTIALS,
-    GOOGLE_CREDENTIALS_JSON
+    GOOGLE_CREDENTIALS_JSON,
+    OPENAI_API_KEY
 )
 
 SUPPORTED_EXTENSIONS = [".mp3", ".wav", ".mp4", ".m4a", ".flac", ".ogg", ".aac"]
@@ -141,14 +142,6 @@ def create_srt_from_json(transcript_json: dict,
     # This ensures quotes spanning multiple segments are handled correctly
     full_srt = "\n".join(out_lines)
     return replace_quotes_with_ukrainian(full_srt)
-
-def write_transcript_file(transcription_result, original_filename, output_dir="/tmp"):
-    base_filename = os.path.splitext(original_filename)[0]
-    txt_file_path = os.path.join(output_dir, f"{base_filename}.txt")
-    transcript = create_transcript(transcription_result)
-    with open(txt_file_path, "w", encoding="utf-8") as f:
-        f.write(transcript)
-    return txt_file_path
 
 def cleanup_temp_file(file_path):
     """Remove temporary file."""
@@ -358,15 +351,92 @@ def upload_as_google_doc(service, file_name, file_content, folder_id):
         }
         
         media = MediaFileUpload(temp_file_path, mimetype='text/plain', resumable=True)
-        
+
         file = service.files().create(
-            body=file_metadata, 
-            media_body=media, 
+            body=file_metadata,
+            media_body=media,
             fields='id, webViewLink',
             supportsAllDrives=True
         ).execute()
-        
+
         # Clean up the temporary file
         os.remove(temp_file_path)
-        
+
         return file.get('webViewLink')
+
+
+def parse_srt_content(srt_text: str) -> list[dict]:
+    """
+    Parse SRT content and extract subtitle entries.
+    Returns a list of dicts with 'index', 'timestamp', and 'text' keys.
+    """
+    entries = []
+    blocks = re.split(r'\n\n+', srt_text.strip())
+
+    for block in blocks:
+        lines = block.strip().split('\n')
+        if len(lines) >= 3:
+            try:
+                index = int(lines[0].strip())
+                timestamp = lines[1].strip()
+                text = '\n'.join(lines[2:]).strip()
+                entries.append({
+                    'index': index,
+                    'timestamp': timestamp,
+                    'text': text
+                })
+            except ValueError:
+                continue
+
+    return entries
+
+
+async def translate_texts_with_openai(texts: list[str]) -> list[str]:
+    """
+    Translate a list of texts to English using OpenAI API.
+    Each line is translated individually.
+    Returns a list of translated texts in the same order.
+    """
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not configured")
+
+    if not texts:
+        return []
+
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+    translations = []
+
+    for i, text in enumerate(texts):
+        response = await client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "You are a translator. Translate the user's text to English. Output ONLY the translation, nothing else."},
+                {"role": "user", "content": text}
+            ],
+            temperature=0.1
+        )
+
+        translated = response.choices[0].message.content.strip()
+        translations.append(translated)
+
+        if (i + 1) % 50 == 0:
+            logging.info(f"[translation] Translated {i + 1}/{len(texts)} lines")
+
+    logging.info(f"[translation] Completed translating {len(texts)} lines")
+    return translations
+
+
+def rebuild_srt_with_translations(entries: list[dict], translations: list[str]) -> str:
+    """
+    Rebuild SRT content with translated texts.
+    Takes parsed entries and list of translated texts.
+    """
+    output_lines = []
+
+    for i, entry in enumerate(entries):
+        output_lines.append(str(entry['index']))
+        output_lines.append(entry['timestamp'])
+        output_lines.append(translations[i] if i < len(translations) else entry['text'])
+        output_lines.append('')  # Blank line between entries
+
+    return '\n'.join(output_lines)

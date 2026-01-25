@@ -13,10 +13,11 @@ from slack_bolt.async_app import AsyncApp
 from config import SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEBUG, DEBUG_GDRIVE
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
-    transcribe_file, get_thread_ts, write_transcript_file,
-    cleanup_temp_file, create_srt_from_json, create_transcript,
+    transcribe_file, get_thread_ts, cleanup_temp_file,
+    create_srt_from_json, create_transcript,
     get_google_drive_service, find_or_create_folder, upload_as_google_doc,
-    get_or_create_shared_drive
+    get_or_create_shared_drive,
+    parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations
 )
 
 # --- Async Setup ---
@@ -346,3 +347,206 @@ async def handle_file_shared_events(event, client):
             
             asyncio.create_task(process_batch_async(batch_key, client))
             logging.info(f"Timer started for batch {batch_key}. Will process in {BATCH_WINDOW_SECONDS}s.")
+
+
+# --- Translation via Emoji Reactions ---
+ENGLISH_FLAG_EMOJIS = {"flag-gb", "flag-us", "flag-england", "gb", "us", "uk"}
+processed_translation_requests = set()  # Track processed translations to prevent duplicates
+
+
+@app.event("reaction_added")
+async def handle_reaction_added(event, client):
+    """Handle emoji reactions for translation requests."""
+    reaction = event.get("reaction", "")
+    user_id = event.get("user")
+    item = event.get("item", {})
+
+    logging.info(f"[reaction] Received reaction: '{reaction}' from user {user_id}")
+
+    # Only process English flag emojis
+    if reaction not in ENGLISH_FLAG_EMOJIS:
+        logging.info(f"[reaction] Ignoring reaction '{reaction}' - not in {ENGLISH_FLAG_EMOJIS}")
+        return
+
+    # Only process reactions on messages
+    if item.get("type") != "message":
+        return
+
+    channel_id = item.get("channel")
+    message_ts = item.get("ts")
+
+    if not channel_id or not message_ts:
+        return
+
+    # Create a unique key for this translation request
+    translation_key = f"{channel_id}:{message_ts}:{reaction}"
+    if translation_key in processed_translation_requests:
+        logging.info(f"Translation request {translation_key} already processed. Skipping.")
+        return
+    processed_translation_requests.add(translation_key)
+
+    logging.info(f"[translation] Received {reaction} emoji on message {message_ts} in {channel_id}")
+
+    try:
+        # First, try to get the message from conversations_history (works for parent messages)
+        result = await client.conversations_history(
+            channel=channel_id,
+            latest=message_ts,
+            limit=1,
+            inclusive=True
+        )
+
+        messages = result.get("messages", [])
+        message = messages[0] if messages else None
+
+        # Check if this message is a thread reply - if so, we need conversations_replies
+        if message and message.get("thread_ts") and message.get("thread_ts") != message_ts:
+            # This is a reply in a thread, fetch via conversations_replies
+            thread_ts = message.get("thread_ts")
+            replies_result = await client.conversations_replies(
+                channel=channel_id,
+                ts=thread_ts
+            )
+            # Find the specific message by ts
+            for reply in replies_result.get("messages", []):
+                if reply.get("ts") == message_ts:
+                    message = reply
+                    break
+
+        # If conversations_history returned the parent but we reacted to a reply,
+        # the ts won't match - try conversations_replies with the message_ts as thread
+        if not message or message.get("ts") != message_ts:
+            # Try fetching as if message_ts could be a thread parent
+            try:
+                replies_result = await client.conversations_replies(
+                    channel=channel_id,
+                    ts=message_ts
+                )
+                for reply in replies_result.get("messages", []):
+                    if reply.get("ts") == message_ts:
+                        message = reply
+                        break
+            except Exception:
+                pass
+
+        if not message:
+            logging.warning(f"[translation] Could not find message {message_ts}")
+            return
+
+        thread_ts = message.get("thread_ts") or message_ts
+
+        logging.info(f"[translation] Message ts: {message.get('ts')}, looking for: {message_ts}")
+        logging.info(f"[translation] Message files: {[f.get('name') for f in message.get('files', [])]}")
+
+        # Check if this message is in a thread (not the parent message)
+        if not thread_ts or thread_ts == message_ts:
+            logging.info(f"[translation] Message {message_ts} is not in a thread. Ignoring.")
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=":no_good: Сорі, переклад працює лише в треді. Постав емоджі на повідомлення з субтитрами всередині треду.",
+                thread_ts=message_ts
+            )
+            return
+
+        # Look for .srt files in the message
+        files = message.get("files", [])
+        srt_files = [f for f in files if f.get("name", "").lower().endswith(".srt")]
+
+        if not srt_files:
+            logging.info(f"[translation] No .srt files found in message {message_ts}")
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=":no_good: Сорі, це не файл із субтитрами. Мені потрібен файл з розширенням `.srt`.",
+                thread_ts=thread_ts
+            )
+            return
+
+        # Process each .srt file
+        for srt_file in srt_files:
+            await process_translation_request(
+                srt_file, user_id, channel_id, thread_ts, client
+            )
+
+    except Exception as e:
+        logging.error(f"[translation] Error handling reaction: {e}", exc_info=True)
+
+
+async def process_translation_request(file_info: dict, user_id: str, channel_id: str, thread_ts: str, client):
+    """Download, translate, and upload an SRT file."""
+    file_id = file_info.get("id")
+    file_name = file_info.get("name", "subtitles.srt")
+    base_name = Path(file_name).stem
+
+    logging.info(f"[translation:{file_id}] Starting translation for {file_name}")
+
+    # Send confirmation message
+    await client.chat_postMessage(
+        channel=channel_id,
+        text=f":saluting_face: Забираю в роботу переклад субтитрів `{file_name}`. Відпишу тобі, коли буде готово.",
+        thread_ts=thread_ts
+    )
+
+    try:
+        # Get fresh file info with download URL
+        fresh_file_info = (await client.files_info(file=file_id))["file"]
+        url_private = fresh_file_info.get("url_private")
+
+        if not url_private:
+            raise ValueError("Could not get file download URL")
+
+        # Download the file
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            local_path = temp_dir_path / file_name
+
+            logging.info(f"[translation:{file_id}] Downloading file")
+            await download_file_streamed(url_private, local_path, client.token)
+
+            # Read the SRT content
+            async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
+                srt_content = await f.read()
+
+            # Parse the SRT
+            logging.info(f"[translation:{file_id}] Parsing SRT content")
+            entries = parse_srt_content(srt_content)
+
+            if not entries:
+                raise ValueError("Could not parse SRT file - no valid entries found")
+
+            # Extract texts for translation
+            texts = [entry["text"] for entry in entries]
+            logging.info(f"[translation:{file_id}] Translating {len(texts)} subtitle entries")
+
+            # Translate using OpenAI
+            translations = await translate_texts_with_openai(texts)
+
+            # Rebuild SRT with translations
+            logging.info(f"[translation:{file_id}] Rebuilding SRT with translations")
+            translated_srt = rebuild_srt_with_translations(entries, translations)
+
+            # Save translated SRT
+            translated_filename = f"{base_name}-eng.srt"
+            translated_path = temp_dir_path / translated_filename
+
+            async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
+                await f.write(translated_srt)
+
+            # Upload to Slack
+            logging.info(f"[translation:{file_id}] Uploading translated file")
+            await client.files_upload_v2(
+                channel=channel_id,
+                file=str(translated_path),
+                title=translated_filename,
+                initial_comment=f":heavy_check_mark: Все вийшло, ось переклад субтитрів для файлу `{file_name}`.",
+                thread_ts=thread_ts
+            )
+
+            logging.info(f"[translation:{file_id}] Translation complete")
+
+    except Exception as e:
+        logging.error(f"[translation:{file_id}] Error: {e}", exc_info=True)
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            thread_ts=thread_ts
+        )

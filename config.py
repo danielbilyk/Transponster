@@ -19,3 +19,6 @@ GOOGLE_CREDENTIALS_JSON = os.getenv("GOOGLE_CREDENTIALS_JSON")
 # Debug mode: disables Google Drive by default (use DEBUG_GDRIVE=true to re-enable)
 DEBUG = os.getenv("DEBUG", "false").lower() == "true"
 DEBUG_GDRIVE = os.getenv("DEBUG_GDRIVE", "false").lower() == "true"
+
+# OpenAI API key for translation
+OPENAI_API_KEY = os.getenv("OPENAI_API_KEY")

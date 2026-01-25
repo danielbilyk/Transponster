@@ -7,3 +7,4 @@ aiohttp
 aiofiles
 google-api-python-client
 python-docx
+openai
