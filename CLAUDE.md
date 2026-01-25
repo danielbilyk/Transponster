@@ -70,12 +70,19 @@ Users can translate `.srt` subtitle files to English by adding a flag emoji reac
 
 **Flow:**
 1. User reacts with English/US/England flag emoji on a message with `.srt` file in a thread
-2. Bot downloads the `.srt`, extracts text lines (deterministic parsing)
-3. Only the text content is sent to OpenAI for translation (timestamps/indices stay untouched)
-4. Bot reconstructs the `.srt` with translated text (deterministic rebuild)
+2. Bot downloads the `.srt`, extracts text lines (deterministic parsing via `parse_srt_content()`)
+3. Each line is sent individually to OpenAI for translation (one API call per line)
+4. Bot reconstructs the `.srt` with translated text (deterministic rebuild via `rebuild_srt_with_translations()`)
 5. Uploads `{original-filename}-eng.srt` to the thread
 
 **Requirements:**
 - `OPENAI_API_KEY` environment variable must be set
 - Slack app needs `reactions:read` scope
 - Only works on messages inside threads (not parent messages)
+
+**Implementation Principle:** LLMs handle translation only—nothing else. All deterministic tasks (parsing SRT structure, preserving timestamps/indices, reassembling the file) are done in Python. The LLM receives plain text and returns plain text. No JSON, no IDs, no structure for the LLM to mess up. This ensures reliability at the cost of more API calls.
+
+**Key functions:**
+- `helpers.py:parse_srt_content()` - Parses SRT into list of entries (index, timestamp, text)
+- `helpers.py:translate_texts_with_openai()` - Async function, sends each line to OpenAI individually
+- `helpers.py:rebuild_srt_with_translations()` - Reassembles SRT from entries + translated texts

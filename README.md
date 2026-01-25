@@ -2,7 +2,7 @@
 
 _Because every PM needs a vibe-coding project that's not good enough for production but gets the job done nevertheless._
 
-This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. For all of this to work, you will need to set up [Slack](#-slack-setup), [ElevenLabs](#-elevenlabs-setup), [Google Drive](#-google-drive-integration), and then [the bot itself](#-bot-setup).
+This is a Slack bot that turns audio or video into transcribed text file using ElevenLabs API. It can also translate `.srt` subtitle files to English using OpenAI. For all of this to work, you will need to set up [Slack](#-slack-setup), [ElevenLabs](#-elevenlabs-setup), [Google Drive](#-google-drive-integration), and then [the bot itself](#-bot-setup).
 
 ---
 
@@ -15,13 +15,14 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 2. **Configure OAuth & Permissions:**
    - In the **OAuth & Permissions** section, add the following [scopes](https://api.slack.com/scopes):
 
-     **Bot Token Scopes**  
-     - `channels:history`  
+     **Bot Token Scopes**
+     - `channels:history`
      - `chat:write`
      - `files:read`
      - `files:write`
      - `groups:history`
      - `mpim:history`
+     - `reactions:read`
      - `users:read`
 
      **User Token Scopes**
@@ -34,7 +35,9 @@ This is a Slack bot that turns audio or video into transcribed text file using E
 3. **Event Subscriptions:**
    - Enable **Event Subscriptions**.
    - Set the Request URL to your public endpoint (e.g., `https://your-domain.com/slack/events`).
-   - Subscribe to the `file_shared` event.
+   - Subscribe to the following events:
+     - `file_shared` (for transcription)
+     - `reaction_added` (for subtitle translation)
    - Save your changes.
 
 ---
@@ -79,6 +82,19 @@ Transponster can automatically upload your transcripts as Word documents (.docx)
 
 ---
 
+## 🌍 Subtitle Translation
+
+Transponster can translate `.srt` subtitle files to English using OpenAI.
+
+**How to use:**
+1. Upload or have an `.srt` file in a Slack thread
+2. React to the message containing the `.srt` file with a flag emoji: 🇬🇧, 🇺🇸, or 🏴󠁧󠁢󠁥󠁮󠁧󠁿
+3. The bot will translate the subtitles and upload `{filename}-eng.srt` to the thread
+
+**Note:** Translation only works on messages inside threads, not on parent messages.
+
+---
+
 ## 🤖 Bot Setup
 
 1. **Clone the Repository:**
@@ -102,6 +118,7 @@ Transponster can automatically upload your transcripts as Word documents (.docx)
    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
    SLACK_SIGNING_SECRET=your-slack-signing-secret
    ELEVENLABS_API_KEY=your-elevenlabs-api-key
+   OPENAI_API_KEY=sk-your-openai-api-key
    GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 
    # Optional: Set a channel for the bot to post a startup message
@@ -167,16 +184,17 @@ This setup allows you to test your bot locally while Slack sends events to your 
    ```
 
 2. **Create a `.env` File**
-   
+
    Make sure you have a `.env` file containing:
    ```
    SLACK_BOT_TOKEN=xoxb-your-slack-bot-token
    SLACK_SIGNING_SECRET=your-slack-signing-secret
    ELEVENLABS_API_KEY=your-elevenlabs-api-key
+   OPENAI_API_KEY=sk-your-openai-api-key
    GOOGLE_CREDENTIALS_JSON='{"type": "service_account", ...}'
 
    # Optional: Set a channel for the bot to post a startup message
-   SLACK_STARTUP_CHANNEL=yor-slack-startup-channel
+   SLACK_STARTUP_CHANNEL=your-slack-startup-channel
    ```
 
 3. **Run the Container**
