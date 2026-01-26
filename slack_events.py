@@ -1,4 +1,5 @@
 import os
+import re
 import asyncio
 import logging
 import tempfile
@@ -17,7 +18,9 @@ from helpers import (
     create_srt_from_json, create_transcript,
     get_google_drive_service, find_or_create_folder, upload_as_google_doc,
     get_or_create_shared_drive,
-    parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations
+    parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations,
+    parse_transcript_content, rebuild_transcript_with_translations,
+    update_docx_with_translation
 )
 
 # --- Async Setup ---
@@ -388,13 +391,19 @@ async def handle_reaction_added(event, client):
     logging.info(f"[translation] Received {reaction} emoji on message {message_ts} in {channel_id}")
 
     try:
-        # First, try to get the message from conversations_history (works for parent messages)
-        result = await client.conversations_history(
-            channel=channel_id,
-            latest=message_ts,
-            limit=1,
-            inclusive=True
-        )
+        # Check if the bot is in this channel before doing anything
+        try:
+            result = await client.conversations_history(
+                channel=channel_id,
+                latest=message_ts,
+                limit=1,
+                inclusive=True
+            )
+        except Exception as e:
+            if "not_in_channel" in str(e):
+                logging.info(f"[translation] Bot not in channel {channel_id}, ignoring reaction")
+                return
+            raise
 
         messages = result.get("messages", [])
         message = messages[0] if messages else None
@@ -443,29 +452,34 @@ async def handle_reaction_added(event, client):
             logging.info(f"[translation] Message {message_ts} is not in a thread. Ignoring.")
             await client.chat_postMessage(
                 channel=channel_id,
-                text=":no_good: Сорі, переклад працює лише в треді. Постав емоджі на повідомлення з субтитрами всередині треду.",
+                text=":no_good: Сорі, переклад працює лише в треді. Постав емоджі на повідомлення з файлом всередині треду.",
                 thread_ts=message_ts
             )
             return
 
-        # Look for .srt files in the message
+        # Look for translatable files in the message
         files = message.get("files", [])
         srt_files = [f for f in files if f.get("name", "").lower().endswith(".srt")]
+        txt_files = [f for f in files if f.get("name", "").lower().endswith(".txt")]
 
-        if not srt_files:
-            logging.info(f"[translation] No .srt files found in message {message_ts}")
+        if srt_files:
+            for srt_file in srt_files:
+                await process_translation_request(
+                    srt_file, user_id, channel_id, thread_ts, client
+                )
+        elif txt_files:
+            for txt_file in txt_files:
+                await process_txt_translation_request(
+                    txt_file, channel_id, thread_ts, client
+                )
+        else:
+            logging.info(f"[translation] No .srt or .txt files found in message {message_ts}")
             await client.chat_postMessage(
                 channel=channel_id,
-                text=":no_good: Сорі, це не файл із субтитрами. Мені потрібен файл з розширенням `.srt`.",
+                text=":no_good: Сорі, це ніби не файл для перекладу. Мені потрібен файл з розширенням `.srt` або `.txt`.",
                 thread_ts=thread_ts
             )
             return
-
-        # Process each .srt file
-        for srt_file in srt_files:
-            await process_translation_request(
-                srt_file, user_id, channel_id, thread_ts, client
-            )
 
     except Exception as e:
         logging.error(f"[translation] Error handling reaction: {e}", exc_info=True)
@@ -545,6 +559,196 @@ async def process_translation_request(file_info: dict, user_id: str, channel_id:
 
     except Exception as e:
         logging.error(f"[translation:{file_id}] Error: {e}", exc_info=True)
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            thread_ts=thread_ts
+        )
+
+
+DRIVE_LINK_PATTERNS = [
+    re.compile(r'drive\.google\.com/file/d/([A-Za-z0-9_-]+)'),
+    re.compile(r'docs\.google\.com/document/d/([A-Za-z0-9_-]+)'),
+    re.compile(r'drive\.google\.com/open\?id=([A-Za-z0-9_-]+)'),
+]
+
+
+async def _find_drive_doc(file_id: str, base_name: str, channel_id: str, thread_ts: str, client) -> str | None:
+    """
+    Find the Google Drive file ID for the .docx corresponding to a transcript.
+    Strategy:
+      1. Search the Transponster shared drive by filename (scoped, handles the normal case)
+      2. Fall back to scraping thread messages for any Drive link (handles renamed files)
+    Returns the Drive file ID or None.
+    """
+    docx_name = f"{base_name}.docx"
+    drive_service = get_google_drive_service()
+
+    # --- Strategy 1: search Transponster shared drive by filename ---
+    if drive_service:
+        try:
+            shared_drive_id = get_or_create_shared_drive(drive_service)
+            if shared_drive_id:
+                query = f"name='{docx_name}' and trashed=false"
+                results = drive_service.files().list(
+                    q=query,
+                    corpora='drive',
+                    driveId=shared_drive_id,
+                    fields='files(id)',
+                    orderBy='createdTime desc',
+                    pageSize=1,
+                    supportsAllDrives=True,
+                    includeItemsFromAllDrives=True
+                ).execute()
+                files_found = results.get('files', [])
+                if files_found:
+                    drive_file_id = files_found[0]['id']
+                    logging.info(f"[txt-translation:{file_id}] Found Drive doc '{docx_name}' (ID: {drive_file_id}) on shared drive")
+                    return drive_file_id
+                else:
+                    logging.info(f"[txt-translation:{file_id}] No doc named '{docx_name}' on shared drive, trying thread fallback")
+        except Exception as e:
+            logging.warning(f"[txt-translation:{file_id}] Drive filename search failed: {e}")
+
+    # --- Strategy 2: scrape thread messages for any Drive link ---
+    try:
+        replies_result = await client.conversations_replies(
+            channel=channel_id,
+            ts=thread_ts
+        )
+        for msg in replies_result.get("messages", []):
+            # Check text field
+            for text_source in (msg.get("text", ""),):
+                for pattern in DRIVE_LINK_PATTERNS:
+                    match = pattern.search(text_source)
+                    if match:
+                        drive_file_id = match.group(1)
+                        logging.info(f"[txt-translation:{file_id}] Found Drive ID '{drive_file_id}' in thread message text")
+                        return drive_file_id
+            # Check attachments
+            for att in msg.get("attachments", []):
+                for field in ("text", "fallback", "from_url", "original_url", "title_link"):
+                    val = att.get(field, "")
+                    for pattern in DRIVE_LINK_PATTERNS:
+                        match = pattern.search(val)
+                        if match:
+                            drive_file_id = match.group(1)
+                            logging.info(f"[txt-translation:{file_id}] Found Drive ID '{drive_file_id}' in thread attachment")
+                            return drive_file_id
+    except Exception as e:
+        logging.warning(f"[txt-translation:{file_id}] Thread scraping fallback failed: {e}")
+
+    logging.info(f"[txt-translation:{file_id}] No Drive doc found via filename or thread scraping")
+    return None
+
+
+async def process_txt_translation_request(file_info: dict, channel_id: str, thread_ts: str, client):
+    """Download, translate, and upload a .txt transcript file. Optionally update the Drive .docx."""
+    file_id = file_info.get("id")
+    file_name = file_info.get("name", "transcript.txt")
+    base_name = Path(file_name).stem
+
+    logging.info(f"[txt-translation:{file_id}] Starting translation for {file_name}")
+
+    await client.chat_postMessage(
+        channel=channel_id,
+        text=f":saluting_face: Забираю в роботу переклад розшифровки `{file_name}`. Відпишу тобі, коли буде готово.",
+        thread_ts=thread_ts
+    )
+
+    try:
+        # Get fresh file info with download URL
+        fresh_file_info = (await client.files_info(file=file_id))["file"]
+        url_private = fresh_file_info.get("url_private")
+
+        if not url_private:
+            raise ValueError("Could not get file download URL")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            local_path = temp_dir_path / file_name
+
+            logging.info(f"[txt-translation:{file_id}] Downloading file")
+            await download_file_streamed(url_private, local_path, client.token)
+
+            async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
+                txt_content = await f.read()
+
+            # Parse the transcript
+            logging.info(f"[txt-translation:{file_id}] Parsing transcript content")
+            entries = parse_transcript_content(txt_content)
+
+            if not entries:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=f":no_good: Сорі, мені не вдалося зчитати файл `{file_name}`. Це не схоже на мою розшифровку. Я лиш свої умію.",
+                    thread_ts=thread_ts
+                )
+                return
+
+            # Extract texts and translate
+            texts = [entry["text"] for entry in entries]
+            logging.info(f"[txt-translation:{file_id}] Translating {len(texts)} transcript entries")
+            translations = await translate_texts_with_openai(texts)
+
+            # Rebuild transcript with translations
+            logging.info(f"[txt-translation:{file_id}] Rebuilding transcript with translations")
+            translated_txt = rebuild_transcript_with_translations(entries, translations)
+
+            # Save and upload translated .txt
+            translated_filename = f"{base_name}-eng.txt"
+            translated_path = temp_dir_path / translated_filename
+
+            async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
+                await f.write(translated_txt)
+
+            logging.info(f"[txt-translation:{file_id}] Uploading translated file")
+            await client.files_upload_v2(
+                channel=channel_id,
+                file=str(translated_path),
+                title=translated_filename,
+                initial_comment=f":heavy_check_mark: Все вийшло, ось переклад розшифровки для файлу `{file_name}`.",
+                thread_ts=thread_ts
+            )
+
+            logging.info(f"[txt-translation:{file_id}] Translation uploaded to Slack")
+
+            # --- Google Drive update (non-fatal) ---
+            try:
+                if DEBUG and not DEBUG_GDRIVE:
+                    logging.info(f"[txt-translation:{file_id}] Skipping Google Drive update (debug mode)")
+                else:
+                    drive_file_id = await _find_drive_doc(file_id, base_name, channel_id, thread_ts, client)
+                    if drive_file_id:
+                        drive_service = get_google_drive_service()
+                        if drive_service:
+                            doc_link = update_docx_with_translation(drive_service, drive_file_id, translated_txt)
+                            if doc_link:
+                                await client.chat_postMessage(
+                                    channel=channel_id,
+                                    text=f"📂 Переклад також додано до <{doc_link}|документа на Google Drive>.",
+                                    thread_ts=thread_ts
+                                )
+                            else:
+                                logging.warning(f"[txt-translation:{file_id}] update_docx_with_translation returned None")
+                                await client.chat_postMessage(
+                                    channel=channel_id,
+                                    text=":information_desk_person: Мені не вдалося знайти документ на Google Drive для цієї розшифровки, тому я дам переклад лише тут у треді.",
+                                    thread_ts=thread_ts
+                                )
+                    else:
+                        await client.chat_postMessage(
+                            channel=channel_id,
+                            text=":information_desk_person: Мені не вдалося знайти документ на Google Drive для цієї розшифровки, тому я дам переклад лише тут у треді.",
+                            thread_ts=thread_ts
+                        )
+            except Exception as e:
+                logging.error(f"[txt-translation:{file_id}] Google Drive update failed: {e}", exc_info=True)
+
+            logging.info(f"[txt-translation:{file_id}] Translation complete")
+
+    except Exception as e:
+        logging.error(f"[txt-translation:{file_id}] Error: {e}", exc_info=True)
         await client.chat_postMessage(
             channel=channel_id,
             text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",

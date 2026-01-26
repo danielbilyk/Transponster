@@ -7,7 +7,7 @@ import asyncio
 
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaFileUpload
+from googleapiclient.http import MediaFileUpload, MediaIoBaseDownload, MediaIoBaseUpload
 from googleapiclient.errors import HttpError
 
 from openai import AsyncOpenAI
@@ -551,3 +551,113 @@ def rebuild_srt_with_translations(entries: list[dict], translations: list[str]) 
         output_lines.append('')  # Blank line between entries
 
     return '\n'.join(output_lines)
+
+
+TRANSCRIPT_HEADER_PATTERN = re.compile(
+    r'\d{2}:\d{2}:\d{2},\d{3} --> \d{2}:\d{2}:\d{2},\d{3} - \[.+\]'
+)
+
+
+def parse_transcript_content(txt_text: str) -> list[dict]:
+    """
+    Parse a Transponster .txt transcript into entries.
+    Each entry has 'header' (timestamp + speaker line) and 'text' (spoken content).
+    Returns empty list if no valid entries found.
+    """
+    lines = txt_text.split('\n')
+    entries = []
+    current_header = None
+    current_text_lines = []
+
+    for line in lines:
+        if TRANSCRIPT_HEADER_PATTERN.match(line.strip()):
+            # Save previous entry if exists
+            if current_header is not None:
+                text = '\n'.join(current_text_lines).strip()
+                if text:
+                    entries.append({'header': current_header, 'text': text})
+            current_header = line.strip()
+            current_text_lines = []
+        elif current_header is not None:
+            current_text_lines.append(line)
+
+    # Save last entry
+    if current_header is not None:
+        text = '\n'.join(current_text_lines).strip()
+        if text:
+            entries.append({'header': current_header, 'text': text})
+
+    return entries
+
+
+def rebuild_transcript_with_translations(entries: list[dict], translations: list[str]) -> str:
+    """
+    Rebuild a .txt transcript using original headers and translated text.
+    """
+    output_lines = []
+    for i, entry in enumerate(entries):
+        output_lines.append(entry['header'])
+        output_lines.append('')
+        output_lines.append(translations[i] if i < len(translations) else entry['text'])
+        output_lines.append('')
+    return '\n'.join(output_lines)
+
+
+def update_docx_with_translation(service, file_id: str, translated_content: str) -> str | None:
+    """
+    Download existing .docx from Drive, append translated content as a new page,
+    re-upload in place. Returns webViewLink or None.
+    """
+    import io
+    from docx import Document
+    from docx.shared import Pt
+    from docx.oxml.ns import qn
+
+    try:
+        # Download existing docx
+        request = service.files().get_media(fileId=file_id, supportsAllDrives=True)
+        buffer = io.BytesIO()
+        downloader = MediaIoBaseDownload(buffer, request)
+        done = False
+        while not done:
+            _, done = downloader.next_chunk()
+
+        buffer.seek(0)
+        doc = Document(buffer)
+
+        # Add page break and heading
+        doc.add_page_break()
+        heading = doc.add_heading('English version', level=1)
+        for run in heading.runs:
+            run.font.name = "Montserrat"
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Montserrat')
+
+        # Add translated content
+        p = doc.add_paragraph(translated_content)
+        for run in p.runs:
+            run.font.name = "Montserrat"
+            run.font.size = Pt(14)
+            run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Montserrat')
+
+        # Save to buffer and re-upload
+        out_buffer = io.BytesIO()
+        doc.save(out_buffer)
+        out_buffer.seek(0)
+
+        media = MediaIoBaseUpload(
+            out_buffer,
+            mimetype='application/vnd.openxmlformats-officedocument.wordprocessingml.document',
+            resumable=True
+        )
+        updated = service.files().update(
+            fileId=file_id,
+            media_body=media,
+            fields='webViewLink',
+            supportsAllDrives=True
+        ).execute()
+
+        return updated.get('webViewLink')
+
+    except Exception as e:
+        logging.error(f"Failed to update docx {file_id} with translation: {e}", exc_info=True)
+        return None
