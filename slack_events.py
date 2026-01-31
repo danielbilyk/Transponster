@@ -17,10 +17,11 @@ from helpers import (
     transcribe_file, get_thread_ts, cleanup_temp_file,
     create_srt_from_json, create_transcript,
     get_google_drive_service, find_or_create_folder, upload_as_google_doc,
-    get_or_create_shared_drive,
+    get_or_create_shared_drive, update_docx_with_translation,
     parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations,
     parse_transcript_content, rebuild_transcript_with_translations
 )
+from file_mappings import save_file_mapping, get_drive_file_id
 
 # --- Async Setup ---
 blocking_task_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
@@ -35,6 +36,14 @@ processed_file_ids = set()
 BATCH_WINDOW_SECONDS = 3.0
 MAX_TRANSCRIPTION_RETRIES = 2
 RETRY_DELAY_SECONDS = 3
+
+def _extract_drive_file_id(drive_url: str) -> str | None:
+    """Extract Google Drive file ID from a webViewLink URL."""
+    # URLs can be like:
+    # https://drive.google.com/file/d/{id}/view?...
+    # https://docs.google.com/document/d/{id}/edit?...
+    match = re.search(r'/d/([a-zA-Z0-9_-]+)', drive_url)
+    return match.group(1) if match else None
 
 # --- Helper Functions ---
 def get_file_word(count: int) -> str:
@@ -142,7 +151,7 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
             temp_files_to_clean.append(txt_path)
 
             logging.info(f"[{file_info['id']}] 7b: Uploading .txt file to Slack.")
-            await client.files_upload_v2(
+            upload_result = await client.files_upload_v2(
                 channel=channel_id,
                 file=str(txt_path),
                 title=f"{base_filename}.txt",
@@ -150,6 +159,17 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                 thread_ts=thread_ts
             )
             await asyncio.sleep(2)
+
+            # Save mapping from Slack file ID to Drive file ID
+            if doc_link:
+                drive_file_id = _extract_drive_file_id(doc_link)
+                # files_upload_v2 returns {'ok': True, 'file': {'id': ...}} or {'files': [...]}
+                uploaded_files = upload_result.get('files') or ([upload_result.get('file')] if upload_result.get('file') else [])
+                if drive_file_id and uploaded_files:
+                    for uploaded_file in uploaded_files:
+                        if uploaded_file and uploaded_file.get('id'):
+                            save_file_mapping(uploaded_file['id'], drive_file_id)
+                            break
 
             # Post Google Drive message (single file only; batch handled separately)
             if batch_context is None and doc_link and user_folder_link:
@@ -214,7 +234,7 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
                         if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
                             logging.warning(f"Attempt {attempt + 1} failed for {file_name}: {e}. Retrying...")
                             error_message = (
-                                f"😑 Сорі, щось пішло не так з файлом `{file_name}`. Помилка:\n\n"
+                                f":expressionless: Сорі, щось пішло не так з файлом `{file_name}`. Помилка:\n\n"
                                 f"```{e}```\n"
                                 f"Я спробую ще раз і відпішу тобі."
                             )
@@ -484,7 +504,7 @@ async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: s
     # Send confirmation message
     await client.chat_postMessage(
         channel=channel_id,
-        text=f":saluting_face: Забираю в роботу переклад субтитрів `{file_name}`. Відпишу тобі, коли буде готово.",
+        text=f":saluting_face: Забираю в роботу переклад субтитрів `{file_name}`. Відпишу тобі, коли буду готовий.",
         thread_ts=thread_ts
     )
 
@@ -541,7 +561,7 @@ async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: s
         logging.error(f"[translation:{file_id}] Error: {e}", exc_info=True)
         await client.chat_postMessage(
             channel=channel_id,
-            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            text=f":expressionless: Сорі, мені не вдалося перекласти `{file_name}`. Помилка: {e}",
             thread_ts=thread_ts
         )
 
@@ -585,7 +605,7 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
             if not entries:
                 await client.chat_postMessage(
                     channel=channel_id,
-                    text=f":no_good: Сорі, не вдалося розпарсити файл `{file_name}`. Це не схоже на розшифровку від Transponster.",
+                    text=f":no_good: Сорі, мені не вдалося зчитати файл `{file_name}`. Це не схоже на мою розшифровку. Я лиш в свої умію.",
                     thread_ts=thread_ts
                 )
                 return
@@ -612,12 +632,39 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
                 thread_ts=thread_ts
             )
 
+            # Try to update the corresponding Google Drive document
+            drive_file_id = get_drive_file_id(file_id)
+            if drive_file_id:
+                logging.info(f"[txt-translation:{file_id}] Found Drive mapping: {drive_file_id}")
+                try:
+                    drive_service = get_google_drive_service()
+                    if drive_service:
+                        doc_link = update_docx_with_translation(drive_service, drive_file_id, translated_txt)
+                        if doc_link:
+                            await client.chat_postMessage(
+                                channel=channel_id,
+                                text=f":open_file_folder: Я також поклав переклад у оригінальний <{doc_link}|документ на Google Drive>.",
+                                thread_ts=thread_ts
+                            )
+                            logging.info(f"[txt-translation:{file_id}] Updated Drive doc successfully")
+                        else:
+                            logging.warning(f"[txt-translation:{file_id}] Failed to update Drive doc")
+                except Exception as e:
+                    logging.error(f"[txt-translation:{file_id}] Error updating Drive doc: {e}")
+            else:
+                logging.info(f"[txt-translation:{file_id}] No Drive mapping found")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=":card_index: Сорі, я не знайшов документ на Google Drive для цієї розшифровки, тому переклад покладв лише у тред.",
+                    thread_ts=thread_ts
+                )
+
             logging.info(f"[txt-translation:{file_id}] Translation complete")
 
     except Exception as e:
         logging.error(f"[txt-translation:{file_id}] Error: {e}", exc_info=True)
         await client.chat_postMessage(
             channel=channel_id,
-            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            text=f":expressionless: Сорі, мені не вдалося перекласти `{file_name}`. Помилка: {e}",
             thread_ts=thread_ts
         )
