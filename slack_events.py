@@ -1,5 +1,6 @@
 import os
 import re
+import json
 import asyncio
 import logging
 import tempfile
@@ -65,16 +66,111 @@ async def download_file_streamed(url: str, local_path: Path, token: str):
             async for chunk in response.content.iter_chunked(8192):
                 await f.write(chunk)
 
+def _extract_drive_file_id(doc_link: str) -> str | None:
+    """Extract Google Drive file ID from a webViewLink URL."""
+    match = re.search(r'/d/([A-Za-z0-9_-]+)', doc_link)
+    return match.group(1) if match else None
+
+# --- Block Kit Builders ---
+def _build_translate_button_blocks(file_id: str, file_name: str, drive_file_id: str | None = None) -> list[dict]:
+    """Build Block Kit blocks with a single Translate button showing the filename."""
+    value_payload = {"file_id": file_id, "file_name": file_name}
+    if drive_file_id:
+        value_payload["drive_file_id"] = drive_file_id
+    return [{
+        "type": "actions",
+        "elements": [{
+            "type": "button",
+            "text": {"type": "plain_text", "text": f"Перекласти {file_name}", "emoji": True},
+            "action_id": "translate_file",
+            "value": json.dumps(value_payload),
+        }]
+    }]
+
+def _build_gdrive_with_translate_blocks(doc_link: str, user_folder_link: str, file_name: str, file_id: str, created: bool) -> list[dict]:
+    """Build Block Kit blocks with Google Drive info + Translate button."""
+    drive_file_id = _extract_drive_file_id(doc_link)
+    doc_base = Path(file_name).stem
+
+    if created:
+        text = "📂 Я створив для тебе папку у нас на Google Drive і поклав розшифровку туди."
+    else:
+        text = "📂 Цю розшифровку ти також знайдеш в оцій папці як Word документ."
+
+    value_payload = {"file_id": file_id, "file_name": file_name}
+    if drive_file_id:
+        value_payload["drive_file_id"] = drive_file_id
+
+    return [
+        {"type": "section", "text": {"type": "mrkdwn", "text": text}},
+        {"type": "actions", "elements": [
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": f"Перекласти {file_name}", "emoji": True},
+                "action_id": "translate_file",
+                "value": json.dumps(value_payload),
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": "Піти в папку", "emoji": True},
+                "action_id": "gdrive_open_folder",
+                "url": user_folder_link,
+            },
+            {
+                "type": "button",
+                "text": {"type": "plain_text", "text": f"Відкрити файл {doc_base}", "emoji": True},
+                "action_id": "gdrive_open_file_0",
+                "url": doc_link,
+            },
+        ]},
+    ]
+
+def _build_batch_gdrive_blocks(gdrive_links: list[tuple[str, str, str]]) -> list[dict]:
+    """Build Block Kit blocks for batch Google Drive summary.
+    gdrive_links: list of (original_filename, doc_link, user_folder_link)
+    """
+    user_folder_link = gdrive_links[0][2]
+    elements = [{
+        "type": "button",
+        "text": {"type": "plain_text", "text": "Піти в папку", "emoji": True},
+        "action_id": "gdrive_open_folder",
+        "url": user_folder_link,
+    }]
+    for i, (filename, doc_link, _) in enumerate(gdrive_links):
+        doc_base = Path(filename).stem
+        elements.append({
+            "type": "button",
+            "text": {"type": "plain_text", "text": f"Відкрити файл {doc_base}", "emoji": True},
+            "action_id": f"gdrive_open_file_{i}",
+            "url": doc_link,
+        })
+    blocks = [
+        {"type": "section", "text": {"type": "mrkdwn", "text": "📂 Ці розшифровки ти також знайдеш в оцій папці як Word документи."}},
+    ]
+    for chunk_start in range(0, len(elements), 25):
+        blocks.append({"type": "actions", "elements": elements[chunk_start:chunk_start + 25]})
+    return blocks
+
+def _build_translating_blocks() -> list[dict]:
+    """Build blocks showing translation in progress."""
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": ":hourglass_flowing_sand: Перекладаю..."}}]
+
+def _build_translated_blocks(doc_link: str | None = None) -> list[dict]:
+    """Build blocks showing translation complete, optionally with Google Drive link."""
+    if doc_link:
+        text = f":white_check_mark: Перекладено\n📂 Переклад також додано до <{doc_link}|документа на Google Drive>."
+    else:
+        text = ":white_check_mark: Перекладено"
+    return [{"type": "section", "text": {"type": "mrkdwn", "text": text}}]
+
 async def run_transcription(local_path: Path) -> dict:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(blocking_task_executor, transcribe_file, str(local_path))
 
 async def generate_and_upload_results(mode: str, base_filename: str, result_data: dict, file_info: dict, user_id: str, channel_id: str, thread_ts: str, client, batch_context=None):
-    upload_tasks = []
     temp_files_to_clean = []
 
     try:
-        srt_upload_task = None
         if mode in ("srt_only", "both"):
             logging.info(f"[{file_info['id']}] 6a: Generating .srt file.")
             srt_path = Path(tempfile.gettempdir()) / f"{base_filename}.srt"
@@ -82,26 +178,40 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
             async with aiofiles.open(srt_path, "w", encoding="utf-8") as f:
                 await f.write(srt_text)
             temp_files_to_clean.append(srt_path)
-            
+
             logging.info(f"[{file_info['id']}] 7a: Uploading .srt file to Slack.")
-            srt_upload_task = client.files_upload_v2(
+            srt_upload_result = await client.files_upload_v2(
                 channel=channel_id,
                 file=str(srt_path),
                 title=f"{base_filename}.srt",
                 initial_comment=f":heavy_check_mark: Все вийшло, ось субтитри для файлу `{file_info['name']}`.",
                 thread_ts=thread_ts
             )
+            await asyncio.sleep(2)
+
+            # Post "Перекласти" button for subtitles
+            uploaded_srt_id = None
+            try:
+                uploaded_srt_id = srt_upload_result["files"][0]["id"]
+            except (KeyError, IndexError, TypeError):
+                logging.warning(f"[{file_info['id']}] Could not extract uploaded SRT file ID from response")
+            if uploaded_srt_id:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    blocks=_build_translate_button_blocks(file_id=uploaded_srt_id, file_name=f"{base_filename}.srt"),
+                    text="Перекласти субтитри",
+                    thread_ts=thread_ts
+                )
 
         if mode in ("txt_only", "both"):
             logging.info(f"[{file_info['id']}] 6b: Generating .txt transcript content.")
             transcript_content = create_transcript(result_data)
-            
+
             # --- Google Drive Integration ---
-            drive_message_task = None
             doc_link = None
             user_folder_link = None
+            folder_created = False
 
-            # Skip Google Drive in debug mode unless explicitly enabled
             if DEBUG and not DEBUG_GDRIVE:
                 logging.info(f"[{file_info['id']}] Skipping Google Drive upload (debug mode)")
             else:
@@ -117,7 +227,6 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                         if shared_drive_id:
                             user_folder_id, user_folder_link, created = find_or_create_folder(drive_service, username, parent_id=shared_drive_id)
                             if user_folder_id:
-                                # Remove .txt or .docx from base_filename for Google Drive doc
                                 doc_base_filename = base_filename
                                 if doc_base_filename.lower().endswith('.txt'):
                                     doc_base_filename = doc_base_filename[:-4]
@@ -127,13 +236,8 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                                 if doc_link:
                                     if batch_context is not None:
                                         batch_context['gdrive_links'].append((file_info['name'], doc_link, user_folder_link))
-                                    else:
-                                        if created:
-                                            message = f"📂 Я створив для тебе <{user_folder_link}|папку> у нас на Google Drive і поклав розшифровку туди. <{doc_link}|Ось твоє посилання на файл>."
-                                        else:
-                                            message = f"📂 Цю розшифровку ти також знайдеш в <{user_folder_link}|оцій папці> як Word документ. <{doc_link}|Ось твоє посилання на файл>."
-                                    drive_message_task = client.chat_postMessage(channel=channel_id, text=message, thread_ts=thread_ts)
-                                    logging.info(f"[{file_info['id']}] 7b-gdrive: Successfully created text file and prepared Slack message.")
+                                    folder_created = created
+                                    logging.info(f"[{file_info['id']}] 7b-gdrive: Successfully created doc.")
                                 else:
                                     raise Exception("Failed to create text file.")
                             else:
@@ -144,27 +248,66 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                         raise Exception("Failed to get Google Drive service.")
                 except Exception as e:
                     logging.error(f"[{file_info['id']}] Google Drive integration failed: {e}. Continuing with Slack upload only.")
-            
+
+            # Upload .txt to Slack
             txt_path = Path(tempfile.gettempdir()) / f"{base_filename}.txt"
             async with aiofiles.open(txt_path, "w", encoding="utf-8") as f:
                 await f.write(transcript_content)
             temp_files_to_clean.append(txt_path)
 
             logging.info(f"[{file_info['id']}] 7b: Uploading .txt file to Slack.")
-            txt_upload_task = client.files_upload_v2(
+            txt_upload_result = await client.files_upload_v2(
                 channel=channel_id,
                 file=str(txt_path),
                 title=f"{base_filename}.txt",
                 initial_comment=f":heavy_check_mark: Все вийшло, ось розшифровка для файлу `{file_info['name']}`.",
                 thread_ts=thread_ts
             )
-            await txt_upload_task
             await asyncio.sleep(2)
-            if drive_message_task:
-                await drive_message_task
 
-        if srt_upload_task:
-            await srt_upload_task
+            # Get uploaded file's Slack ID for the translate button
+            uploaded_txt_id = None
+            try:
+                uploaded_txt_id = txt_upload_result["files"][0]["id"]
+            except (KeyError, IndexError, TypeError):
+                logging.warning(f"[{file_info['id']}] Could not extract uploaded TXT file ID from response")
+            uploaded_txt_name = f"{base_filename}.txt"
+            drive_file_id = _extract_drive_file_id(doc_link) if doc_link else None
+
+            # Post Block Kit follow-up message
+            if batch_context is None:
+                # Single file: combined Drive buttons + Translate button
+                if doc_link and user_folder_link and uploaded_txt_id:
+                    blocks = _build_gdrive_with_translate_blocks(
+                        doc_link=doc_link, user_folder_link=user_folder_link,
+                        file_name=uploaded_txt_name, file_id=uploaded_txt_id,
+                        created=folder_created,
+                    )
+                elif uploaded_txt_id:
+                    blocks = _build_translate_button_blocks(
+                        file_id=uploaded_txt_id, file_name=uploaded_txt_name,
+                        drive_file_id=drive_file_id,
+                    )
+                else:
+                    blocks = None
+
+                if blocks:
+                    await client.chat_postMessage(
+                        channel=channel_id, blocks=blocks,
+                        text="Google Drive та переклад", thread_ts=thread_ts,
+                    )
+            else:
+                # Batch mode: per-file Translate button only (Drive summary posted separately)
+                if uploaded_txt_id:
+                    blocks = _build_translate_button_blocks(
+                        file_id=uploaded_txt_id, file_name=uploaded_txt_name,
+                        drive_file_id=drive_file_id,
+                    )
+                    await client.chat_postMessage(
+                        channel=channel_id, blocks=blocks,
+                        text="Перекласти", thread_ts=thread_ts,
+                    )
+
         logging.info(f"[{file_info['id']}] 8: Successfully uploaded results.")
 
     finally:
@@ -305,14 +448,13 @@ async def process_batch_async(batch_key: tuple, client):
     ]
     await asyncio.gather(*processing_tasks)
 
-    # After all files processed, if multi-file and any links, send summary message
+    # After all files processed, if multi-file and any links, send Block Kit summary
     if batch_context and batch_context['gdrive_links']:
-        user_folder_link = batch_context['gdrive_links'][0][2]  # All files in same folder
-        lines = [":open_file_folder: Ці розшифровки ти також знайдеш в <{}|оцій папці> як Word документи.".format(user_folder_link)]
-        for filename, doc_link, _ in batch_context['gdrive_links']:
-            lines.append(f"• <{doc_link}|Ось твоє посилання на файл> `{filename}`.")
-        summary_message = "\n".join(lines)
-        await client.chat_postMessage(channel=channel_id, text=summary_message, thread_ts=thread_ts)
+        blocks = _build_batch_gdrive_blocks(batch_context['gdrive_links'])
+        await client.chat_postMessage(
+            channel=channel_id, blocks=blocks,
+            text="Google Drive файли", thread_ts=thread_ts,
+        )
 
 @app.event("file_shared")
 async def handle_file_shared_events(event, client):
@@ -352,405 +494,215 @@ async def handle_file_shared_events(event, client):
             logging.info(f"Timer started for batch {batch_key}. Will process in {BATCH_WINDOW_SECONDS}s.")
 
 
-# --- Translation via Emoji Reactions ---
-ENGLISH_FLAG_EMOJIS = {"flag-gb", "flag-us", "flag-england", "gb", "us", "uk"}
-processed_translation_requests = set()  # Track processed translations to prevent duplicates
+# --- Interactive Button Handlers ---
+@app.action("translate_file")
+async def handle_translate_button(ack, body, client):
+    """Handle the Translate button click."""
+    await ack()
 
+    action = body["actions"][0]
+    value = json.loads(action["value"])
+    file_id = value["file_id"]
+    file_name = value["file_name"]
+    drive_file_id = value.get("drive_file_id")
 
-@app.event("reaction_added")
-async def handle_reaction_added(event, client):
-    """Handle emoji reactions for translation requests."""
-    reaction = event.get("reaction", "")
-    user_id = event.get("user")
-    item = event.get("item", {})
+    channel_id = body["channel"]["id"]
+    message_ts = body["message"]["ts"]
+    thread_ts = body["message"].get("thread_ts") or message_ts
+    user_id = body["user"]["id"]
 
-    logging.info(f"[reaction] Received reaction: '{reaction}' from user {user_id}")
+    logging.info(f"[translate-button] User {user_id} clicked translate for {file_name} (file {file_id})")
 
-    # Only process English flag emojis
-    if reaction not in ENGLISH_FLAG_EMOJIS:
-        logging.info(f"[reaction] Ignoring reaction '{reaction}' - not in {ENGLISH_FLAG_EMOJIS}")
-        return
-
-    # Only process reactions on messages
-    if item.get("type") != "message":
-        return
-
-    channel_id = item.get("channel")
-    message_ts = item.get("ts")
-
-    if not channel_id or not message_ts:
-        return
-
-    # Create a unique key for this translation request
-    translation_key = f"{channel_id}:{message_ts}:{reaction}"
-    if translation_key in processed_translation_requests:
-        logging.info(f"Translation request {translation_key} already processed. Skipping.")
-        return
-    processed_translation_requests.add(translation_key)
-
-    logging.info(f"[translation] Received {reaction} emoji on message {message_ts} in {channel_id}")
+    # Update message to show "Translating..."
+    try:
+        await client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=_build_translating_blocks(),
+            text="Перекладаю...",
+        )
+    except Exception as e:
+        logging.error(f"[translate-button] Failed to update message to 'translating': {e}")
 
     try:
-        # Check if the bot is in this channel before doing anything
-        try:
-            result = await client.conversations_history(
-                channel=channel_id,
-                latest=message_ts,
-                limit=1,
-                inclusive=True
-            )
-        except Exception as e:
-            if "not_in_channel" in str(e):
-                logging.info(f"[translation] Bot not in channel {channel_id}, ignoring reaction")
-                return
-            raise
+        file_info = (await client.files_info(file=file_id))["file"]
+        result_doc_link = None
 
-        messages = result.get("messages", [])
-        message = messages[0] if messages else None
-
-        # Check if this message is a thread reply - if so, we need conversations_replies
-        if message and message.get("thread_ts") and message.get("thread_ts") != message_ts:
-            # This is a reply in a thread, fetch via conversations_replies
-            thread_ts = message.get("thread_ts")
-            replies_result = await client.conversations_replies(
-                channel=channel_id,
-                ts=thread_ts
-            )
-            # Find the specific message by ts
-            for reply in replies_result.get("messages", []):
-                if reply.get("ts") == message_ts:
-                    message = reply
-                    break
-
-        # If conversations_history returned the parent but we reacted to a reply,
-        # the ts won't match - try conversations_replies with the message_ts as thread
-        if not message or message.get("ts") != message_ts:
-            # Try fetching as if message_ts could be a thread parent
-            try:
-                replies_result = await client.conversations_replies(
-                    channel=channel_id,
-                    ts=message_ts
-                )
-                for reply in replies_result.get("messages", []):
-                    if reply.get("ts") == message_ts:
-                        message = reply
-                        break
-            except Exception:
-                pass
-
-        if not message:
-            logging.warning(f"[translation] Could not find message {message_ts}")
-            return
-
-        thread_ts = message.get("thread_ts") or message_ts
-
-        logging.info(f"[translation] Message ts: {message.get('ts')}, looking for: {message_ts}")
-        logging.info(f"[translation] Message files: {[f.get('name') for f in message.get('files', [])]}")
-
-        # Check if this message is in a thread (not the parent message)
-        if not thread_ts or thread_ts == message_ts:
-            logging.info(f"[translation] Message {message_ts} is not in a thread. Ignoring.")
-            await client.chat_postMessage(
-                channel=channel_id,
-                text=":no_good: Сорі, переклад працює лише в треді. Постав емоджі на повідомлення з файлом всередині треду.",
-                thread_ts=message_ts
-            )
-            return
-
-        # Look for translatable files in the message
-        files = message.get("files", [])
-        srt_files = [f for f in files if f.get("name", "").lower().endswith(".srt")]
-        txt_files = [f for f in files if f.get("name", "").lower().endswith(".txt")]
-
-        if srt_files:
-            for srt_file in srt_files:
-                await process_translation_request(
-                    srt_file, user_id, channel_id, thread_ts, client
-                )
-        elif txt_files:
-            for txt_file in txt_files:
-                await process_txt_translation_request(
-                    txt_file, channel_id, thread_ts, client
-                )
+        if file_name.lower().endswith(".srt"):
+            await process_translation_request(file_info, user_id, channel_id, thread_ts, client)
+        elif file_name.lower().endswith(".txt"):
+            result_doc_link = await process_txt_translation_request(file_info, channel_id, thread_ts, client, drive_file_id=drive_file_id)
         else:
-            logging.info(f"[translation] No .srt or .txt files found in message {message_ts}")
-            await client.chat_postMessage(
-                channel=channel_id,
-                text=":no_good: Сорі, це ніби не файл для перекладу. Мені потрібен файл з розширенням `.srt` або `.txt`.",
-                thread_ts=thread_ts
-            )
-            return
+            raise ValueError(f"Unsupported file type: {file_name}")
 
+        # Update message to show "Translated" (with Drive link if available)
+        await client.chat_update(
+            channel=channel_id,
+            ts=message_ts,
+            blocks=_build_translated_blocks(doc_link=result_doc_link),
+            text="Перекладено",
+        )
     except Exception as e:
-        logging.error(f"[translation] Error handling reaction: {e}", exc_info=True)
+        logging.error(f"[translate-button] Translation failed: {e}", exc_info=True)
+        try:
+            await client.chat_update(
+                channel=channel_id,
+                ts=message_ts,
+                blocks=[{"type": "section", "text": {"type": "mrkdwn", "text": f":pensive: Не вдалося перекласти. Помилка: {e}"}}],
+                text=f"Не вдалося перекласти: {e}",
+            )
+        except Exception as update_err:
+            logging.error(f"[translate-button] Failed to update error message: {update_err}")
+
+
+@app.action(re.compile(r"^gdrive_"))
+async def handle_gdrive_url_buttons(ack, body):
+    """Acknowledge URL button clicks (no server-side action needed)."""
+    await ack()
 
 
 async def process_translation_request(file_info: dict, user_id: str, channel_id: str, thread_ts: str, client):
-    """Download, translate, and upload an SRT file."""
+    """Download, translate, and upload an SRT file. Raises on failure."""
     file_id = file_info.get("id")
     file_name = file_info.get("name", "subtitles.srt")
     base_name = Path(file_name).stem
 
     logging.info(f"[translation:{file_id}] Starting translation for {file_name}")
 
-    # Send confirmation message
-    await client.chat_postMessage(
-        channel=channel_id,
-        text=f":saluting_face: Забираю в роботу переклад субтитрів `{file_name}`. Відпишу тобі, коли буде готово.",
-        thread_ts=thread_ts
-    )
+    # Get fresh file info with download URL
+    fresh_file_info = (await client.files_info(file=file_id))["file"]
+    url_private = fresh_file_info.get("url_private")
 
-    try:
-        # Get fresh file info with download URL
-        fresh_file_info = (await client.files_info(file=file_id))["file"]
-        url_private = fresh_file_info.get("url_private")
+    if not url_private:
+        raise ValueError("Could not get file download URL")
 
-        if not url_private:
-            raise ValueError("Could not get file download URL")
+    # Download the file
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        local_path = temp_dir_path / file_name
 
-        # Download the file
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            local_path = temp_dir_path / file_name
+        logging.info(f"[translation:{file_id}] Downloading file")
+        await download_file_streamed(url_private, local_path, client.token)
 
-            logging.info(f"[translation:{file_id}] Downloading file")
-            await download_file_streamed(url_private, local_path, client.token)
+        # Read the SRT content
+        async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
+            srt_content = await f.read()
 
-            # Read the SRT content
-            async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
-                srt_content = await f.read()
+        # Parse the SRT
+        logging.info(f"[translation:{file_id}] Parsing SRT content")
+        entries = parse_srt_content(srt_content)
 
-            # Parse the SRT
-            logging.info(f"[translation:{file_id}] Parsing SRT content")
-            entries = parse_srt_content(srt_content)
+        if not entries:
+            raise ValueError("Could not parse SRT file - no valid entries found")
 
-            if not entries:
-                raise ValueError("Could not parse SRT file - no valid entries found")
+        # Extract texts for translation
+        texts = [entry["text"] for entry in entries]
+        logging.info(f"[translation:{file_id}] Translating {len(texts)} subtitle entries")
 
-            # Extract texts for translation
-            texts = [entry["text"] for entry in entries]
-            logging.info(f"[translation:{file_id}] Translating {len(texts)} subtitle entries")
+        # Translate using OpenAI
+        translations = await translate_texts_with_openai(texts)
 
-            # Translate using OpenAI
-            translations = await translate_texts_with_openai(texts)
+        # Rebuild SRT with translations
+        logging.info(f"[translation:{file_id}] Rebuilding SRT with translations")
+        translated_srt = rebuild_srt_with_translations(entries, translations)
 
-            # Rebuild SRT with translations
-            logging.info(f"[translation:{file_id}] Rebuilding SRT with translations")
-            translated_srt = rebuild_srt_with_translations(entries, translations)
+        # Save translated SRT
+        translated_filename = f"{base_name}-eng.srt"
+        translated_path = temp_dir_path / translated_filename
 
-            # Save translated SRT
-            translated_filename = f"{base_name}-eng.srt"
-            translated_path = temp_dir_path / translated_filename
+        async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
+            await f.write(translated_srt)
 
-            async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
-                await f.write(translated_srt)
-
-            # Upload to Slack
-            logging.info(f"[translation:{file_id}] Uploading translated file")
-            await client.files_upload_v2(
-                channel=channel_id,
-                file=str(translated_path),
-                title=translated_filename,
-                initial_comment=f":heavy_check_mark: Все вийшло, ось переклад субтитрів для файлу `{file_name}`.",
-                thread_ts=thread_ts
-            )
-
-            logging.info(f"[translation:{file_id}] Translation complete")
-
-    except Exception as e:
-        logging.error(f"[translation:{file_id}] Error: {e}", exc_info=True)
-        await client.chat_postMessage(
+        # Upload to Slack
+        logging.info(f"[translation:{file_id}] Uploading translated file")
+        await client.files_upload_v2(
             channel=channel_id,
-            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            file=str(translated_path),
+            title=translated_filename,
+            initial_comment=f":heavy_check_mark: Все вийшло, ось переклад субтитрів для файлу `{file_name}`.",
             thread_ts=thread_ts
         )
 
-
-DRIVE_LINK_PATTERNS = [
-    re.compile(r'drive\.google\.com/file/d/([A-Za-z0-9_-]+)'),
-    re.compile(r'docs\.google\.com/document/d/([A-Za-z0-9_-]+)'),
-    re.compile(r'drive\.google\.com/open\?id=([A-Za-z0-9_-]+)'),
-]
+        logging.info(f"[translation:{file_id}] Translation complete")
 
 
-async def _find_drive_doc(file_id: str, base_name: str, channel_id: str, thread_ts: str, client) -> str | None:
+async def process_txt_translation_request(file_info: dict, channel_id: str, thread_ts: str, client, drive_file_id: str | None = None) -> str | None:
+    """Download, translate, and upload a .txt transcript file. Optionally update the Drive .docx.
+    Returns the Google Drive doc_link if the Drive doc was updated, None otherwise.
     """
-    Find the Google Drive file ID for the .docx corresponding to a transcript.
-    Strategy:
-      1. Search the Transponster shared drive by filename (scoped, handles the normal case)
-      2. Fall back to scraping thread messages for any Drive link (handles renamed files)
-    Returns the Drive file ID or None.
-    """
-    docx_name = f"{base_name}.docx"
-    drive_service = get_google_drive_service()
-
-    # --- Strategy 1: search Transponster shared drive by filename ---
-    if drive_service:
-        try:
-            shared_drive_id = get_or_create_shared_drive(drive_service)
-            if shared_drive_id:
-                query = f"name='{docx_name}' and trashed=false"
-                results = drive_service.files().list(
-                    q=query,
-                    corpora='drive',
-                    driveId=shared_drive_id,
-                    fields='files(id)',
-                    orderBy='createdTime desc',
-                    pageSize=1,
-                    supportsAllDrives=True,
-                    includeItemsFromAllDrives=True
-                ).execute()
-                files_found = results.get('files', [])
-                if files_found:
-                    drive_file_id = files_found[0]['id']
-                    logging.info(f"[txt-translation:{file_id}] Found Drive doc '{docx_name}' (ID: {drive_file_id}) on shared drive")
-                    return drive_file_id
-                else:
-                    logging.info(f"[txt-translation:{file_id}] No doc named '{docx_name}' on shared drive, trying thread fallback")
-        except Exception as e:
-            logging.warning(f"[txt-translation:{file_id}] Drive filename search failed: {e}")
-
-    # --- Strategy 2: scrape thread messages for any Drive link ---
-    try:
-        replies_result = await client.conversations_replies(
-            channel=channel_id,
-            ts=thread_ts
-        )
-        for msg in replies_result.get("messages", []):
-            # Check text field
-            for text_source in (msg.get("text", ""),):
-                for pattern in DRIVE_LINK_PATTERNS:
-                    match = pattern.search(text_source)
-                    if match:
-                        drive_file_id = match.group(1)
-                        logging.info(f"[txt-translation:{file_id}] Found Drive ID '{drive_file_id}' in thread message text")
-                        return drive_file_id
-            # Check attachments
-            for att in msg.get("attachments", []):
-                for field in ("text", "fallback", "from_url", "original_url", "title_link"):
-                    val = att.get(field, "")
-                    for pattern in DRIVE_LINK_PATTERNS:
-                        match = pattern.search(val)
-                        if match:
-                            drive_file_id = match.group(1)
-                            logging.info(f"[txt-translation:{file_id}] Found Drive ID '{drive_file_id}' in thread attachment")
-                            return drive_file_id
-    except Exception as e:
-        logging.warning(f"[txt-translation:{file_id}] Thread scraping fallback failed: {e}")
-
-    logging.info(f"[txt-translation:{file_id}] No Drive doc found via filename or thread scraping")
-    return None
-
-
-async def process_txt_translation_request(file_info: dict, channel_id: str, thread_ts: str, client):
-    """Download, translate, and upload a .txt transcript file. Optionally update the Drive .docx."""
     file_id = file_info.get("id")
     file_name = file_info.get("name", "transcript.txt")
     base_name = Path(file_name).stem
+    result_doc_link = None
 
     logging.info(f"[txt-translation:{file_id}] Starting translation for {file_name}")
 
-    await client.chat_postMessage(
-        channel=channel_id,
-        text=f":saluting_face: Забираю в роботу переклад розшифровки `{file_name}`. Відпишу тобі, коли буде готово.",
-        thread_ts=thread_ts
-    )
+    # Get fresh file info with download URL
+    fresh_file_info = (await client.files_info(file=file_id))["file"]
+    url_private = fresh_file_info.get("url_private")
 
-    try:
-        # Get fresh file info with download URL
-        fresh_file_info = (await client.files_info(file=file_id))["file"]
-        url_private = fresh_file_info.get("url_private")
+    if not url_private:
+        raise ValueError("Could not get file download URL")
 
-        if not url_private:
-            raise ValueError("Could not get file download URL")
+    with tempfile.TemporaryDirectory() as temp_dir:
+        temp_dir_path = Path(temp_dir)
+        local_path = temp_dir_path / file_name
 
-        with tempfile.TemporaryDirectory() as temp_dir:
-            temp_dir_path = Path(temp_dir)
-            local_path = temp_dir_path / file_name
+        logging.info(f"[txt-translation:{file_id}] Downloading file")
+        await download_file_streamed(url_private, local_path, client.token)
 
-            logging.info(f"[txt-translation:{file_id}] Downloading file")
-            await download_file_streamed(url_private, local_path, client.token)
+        async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
+            txt_content = await f.read()
 
-            async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
-                txt_content = await f.read()
+        # Parse the transcript
+        logging.info(f"[txt-translation:{file_id}] Parsing transcript content")
+        entries = parse_transcript_content(txt_content)
 
-            # Parse the transcript
-            logging.info(f"[txt-translation:{file_id}] Parsing transcript content")
-            entries = parse_transcript_content(txt_content)
+        if not entries:
+            raise ValueError(f"Не вдалося зчитати файл `{file_name}`. Це не схоже на мою розшифровку.")
 
-            if not entries:
-                await client.chat_postMessage(
-                    channel=channel_id,
-                    text=f":no_good: Сорі, мені не вдалося зчитати файл `{file_name}`. Це не схоже на мою розшифровку. Я лиш свої умію.",
-                    thread_ts=thread_ts
-                )
-                return
+        # Extract texts and translate
+        texts = [entry["text"] for entry in entries]
+        logging.info(f"[txt-translation:{file_id}] Translating {len(texts)} transcript entries")
+        translations = await translate_texts_with_openai(texts)
 
-            # Extract texts and translate
-            texts = [entry["text"] for entry in entries]
-            logging.info(f"[txt-translation:{file_id}] Translating {len(texts)} transcript entries")
-            translations = await translate_texts_with_openai(texts)
+        # Rebuild transcript with translations
+        logging.info(f"[txt-translation:{file_id}] Rebuilding transcript with translations")
+        translated_txt = rebuild_transcript_with_translations(entries, translations)
 
-            # Rebuild transcript with translations
-            logging.info(f"[txt-translation:{file_id}] Rebuilding transcript with translations")
-            translated_txt = rebuild_transcript_with_translations(entries, translations)
+        # Save and upload translated .txt
+        translated_filename = f"{base_name}-eng.txt"
+        translated_path = temp_dir_path / translated_filename
 
-            # Save and upload translated .txt
-            translated_filename = f"{base_name}-eng.txt"
-            translated_path = temp_dir_path / translated_filename
+        async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
+            await f.write(translated_txt)
 
-            async with aiofiles.open(translated_path, "w", encoding="utf-8") as f:
-                await f.write(translated_txt)
-
-            logging.info(f"[txt-translation:{file_id}] Uploading translated file")
-            await client.files_upload_v2(
-                channel=channel_id,
-                file=str(translated_path),
-                title=translated_filename,
-                initial_comment=f":heavy_check_mark: Все вийшло, ось переклад розшифровки для файлу `{file_name}`.",
-                thread_ts=thread_ts
-            )
-
-            logging.info(f"[txt-translation:{file_id}] Translation uploaded to Slack")
-
-            # --- Google Drive update (non-fatal) ---
-            try:
-                if DEBUG and not DEBUG_GDRIVE:
-                    logging.info(f"[txt-translation:{file_id}] Skipping Google Drive update (debug mode)")
-                else:
-                    drive_file_id = await _find_drive_doc(file_id, base_name, channel_id, thread_ts, client)
-                    if drive_file_id:
-                        drive_service = get_google_drive_service()
-                        if drive_service:
-                            doc_link = update_docx_with_translation(drive_service, drive_file_id, translated_txt)
-                            if doc_link:
-                                await client.chat_postMessage(
-                                    channel=channel_id,
-                                    text=f"📂 Переклад також додано до <{doc_link}|документа на Google Drive>.",
-                                    thread_ts=thread_ts
-                                )
-                            else:
-                                logging.warning(f"[txt-translation:{file_id}] update_docx_with_translation returned None")
-                                await client.chat_postMessage(
-                                    channel=channel_id,
-                                    text=":information_desk_person: Мені не вдалося знайти документ на Google Drive для цієї розшифровки, тому я дам переклад лише тут у треді.",
-                                    thread_ts=thread_ts
-                                )
-                    else:
-                        await client.chat_postMessage(
-                            channel=channel_id,
-                            text=":information_desk_person: Мені не вдалося знайти документ на Google Drive для цієї розшифровки, тому я дам переклад лише тут у треді.",
-                            thread_ts=thread_ts
-                        )
-            except Exception as e:
-                logging.error(f"[txt-translation:{file_id}] Google Drive update failed: {e}", exc_info=True)
-
-            logging.info(f"[txt-translation:{file_id}] Translation complete")
-
-    except Exception as e:
-        logging.error(f"[txt-translation:{file_id}] Error: {e}", exc_info=True)
-        await client.chat_postMessage(
+        logging.info(f"[txt-translation:{file_id}] Uploading translated file")
+        await client.files_upload_v2(
             channel=channel_id,
-            text=f":pensive: Сорі, не вдалося перекласти `{file_name}`. Помилка: {e}",
+            file=str(translated_path),
+            title=translated_filename,
+            initial_comment=f":heavy_check_mark: Все вийшло, ось переклад розшифровки для файлу `{file_name}`.",
             thread_ts=thread_ts
         )
+
+        logging.info(f"[txt-translation:{file_id}] Translation uploaded to Slack")
+
+        # --- Google Drive update (non-fatal) ---
+        try:
+            if DEBUG and not DEBUG_GDRIVE:
+                logging.info(f"[txt-translation:{file_id}] Skipping Google Drive update (debug mode)")
+            elif drive_file_id:
+                drive_service = get_google_drive_service()
+                if drive_service:
+                    result_doc_link = update_docx_with_translation(drive_service, drive_file_id, translated_txt)
+                    if not result_doc_link:
+                        logging.warning(f"[txt-translation:{file_id}] update_docx_with_translation returned None")
+            else:
+                logging.info(f"[txt-translation:{file_id}] No drive_file_id provided, skipping Drive update")
+        except Exception as e:
+            logging.error(f"[txt-translation:{file_id}] Google Drive update failed: {e}", exc_info=True)
+
+        logging.info(f"[txt-translation:{file_id}] Translation complete")
+
+    return result_doc_link
