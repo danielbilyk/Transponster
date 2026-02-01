@@ -432,6 +432,25 @@ CRITICAL RULES:
 If a line is just a word like "Yes" or "No", translate it as a single word. Do not combine with adjacent lines."""
 
 
+CLEANUP_SYSTEM_PROMPT = """Ти редактор усного мовлення. Твоя єдина задача — прибрати словесне сміття з розшифровки, НЕ змінюючи зміст.
+
+ПРИБЕРИ:
+- Звуки вагання: "еее", "е", "ммм", "хм", "и-и", "а-а"
+- Слова-паразити: "ну", "от", "вот", "типу", "коротше", "скажем так", "як би", "там" (коли не вказує на місце)
+- Зайві повтори слів підряд
+- Русизми замінюй на українські відповідники: "получається"→"виходить", "вобще"→"взагалі", "надо"→"потрібно", "єтот/етот"→"цей", "конєчно"→"звісно"
+
+НЕ ЧІПАЙ:
+- Зміст і факти — жодних додавань чи вигадок
+- Імена, назви, терміни, цифри
+- Авторський стиль мовця (якщо людина каже "блін" — залиш)
+- Структуру речень (не переписуй, лише чисти)
+
+Якщо сегмент складається лише з "Угу", "Так", "Ага" — залиш як є.
+
+Поверни JSON з полем "cleaned" — масив очищених рядків у тому ж порядку, що й вхідні."""
+
+
 async def _translate_single_line(client, text: str) -> str:
     """Translate a single line - used as fallback."""
     response = await client.chat.completions.create(
@@ -537,6 +556,128 @@ async def translate_texts_with_openai(texts: list[str]) -> list[str]:
     return translations
 
 
+# --- Cleanup (filler word removal) ---
+
+def _make_cleanup_schema(n: int) -> dict:
+    """Generate a JSON schema that enforces exactly n cleaned items."""
+    return {
+        "type": "json_schema",
+        "json_schema": {
+            "name": "cleanup_response",
+            "strict": True,
+            "schema": {
+                "type": "object",
+                "properties": {
+                    "cleaned": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "minItems": n,
+                        "maxItems": n
+                    }
+                },
+                "required": ["cleaned"],
+                "additionalProperties": False
+            }
+        }
+    }
+
+
+async def _cleanup_single_line(client, text: str) -> str:
+    """Clean up a single line - used as fallback."""
+    response = await client.chat.completions.create(
+        model="gpt-4o-mini",
+        messages=[
+            {"role": "system", "content": "Прибери слова-паразити (ну, еее, типу, коротше, скажем так) та русизми з тексту. Не змінюй зміст. Поверни лише очищений текст."},
+            {"role": "user", "content": text}
+        ],
+        temperature=0
+    )
+    return response.choices[0].message.content.strip()
+
+
+async def _cleanup_batch(client, batch: list[str], batch_num: int, total_batches: int) -> list[str]:
+    """
+    Clean up a batch of lines using structured outputs.
+    Returns cleaned lines, falling back to line-by-line if validation fails.
+    """
+    n = len(batch)
+    schema = _make_cleanup_schema(n)
+
+    for attempt in range(2):
+        try:
+            response = await asyncio.wait_for(
+                client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[
+                        {"role": "system", "content": CLEANUP_SYSTEM_PROMPT},
+                        {"role": "user", "content": json.dumps(batch, ensure_ascii=False)}
+                    ],
+                    response_format=schema,
+                    temperature=0
+                ),
+                timeout=TRANSLATION_BATCH_TIMEOUT
+            )
+
+            result = json.loads(response.choices[0].message.content)
+            cleaned = result.get("cleaned", [])
+
+            if len(cleaned) == n:
+                logging.info(f"[cleanup] Batch {batch_num}/{total_batches} OK ({n} lines)")
+                return cleaned
+            else:
+                logging.warning(f"[cleanup] Batch {batch_num}/{total_batches} length mismatch: expected {n}, got {len(cleaned)} (attempt {attempt + 1})")
+
+        except asyncio.TimeoutError:
+            logging.warning(f"[cleanup] Batch {batch_num}/{total_batches} timeout (attempt {attempt + 1})")
+
+        except Exception as e:
+            logging.warning(f"[cleanup] Batch {batch_num}/{total_batches} error (attempt {attempt + 1}): {e}")
+
+    # Fallback to line-by-line
+    logging.info(f"[cleanup] Batch {batch_num}/{total_batches} falling back to line-by-line ({n} lines)")
+    fallback_results = []
+    for text in batch:
+        cleaned = await _cleanup_single_line(client, text)
+        fallback_results.append(cleaned)
+    return fallback_results
+
+
+async def clean_texts_with_openai(texts: list[str]) -> list[str]:
+    """
+    Clean up a list of Ukrainian texts by removing filler words.
+    Uses batched requests with structured outputs for efficiency.
+    Returns a list of cleaned texts in the same order.
+    """
+    if not OPENAI_API_KEY:
+        raise ValueError("OPENAI_API_KEY is not configured")
+
+    if not texts:
+        return []
+
+    client = AsyncOpenAI(api_key=OPENAI_API_KEY)
+
+    batches = [texts[i:i + TRANSLATION_BATCH_SIZE] for i in range(0, len(texts), TRANSLATION_BATCH_SIZE)]
+    total_batches = len(batches)
+
+    logging.info(f"[cleanup] Starting cleanup of {len(texts)} lines in {total_batches} batches")
+
+    semaphore = asyncio.Semaphore(TRANSLATION_MAX_CONCURRENT)
+
+    async def process_with_semaphore(batch, batch_num):
+        async with semaphore:
+            return await _cleanup_batch(client, batch, batch_num, total_batches)
+
+    tasks = [process_with_semaphore(batch, i + 1) for i, batch in enumerate(batches)]
+    batch_results = await asyncio.gather(*tasks)
+
+    cleaned_texts = []
+    for result in batch_results:
+        cleaned_texts.extend(result)
+
+    logging.info(f"[cleanup] Completed cleaning {len(texts)} lines")
+    return cleaned_texts
+
+
 def rebuild_srt_with_translations(entries: list[dict], translations: list[str]) -> str:
     """
     Rebuild SRT content with translated texts.
@@ -603,9 +744,9 @@ def rebuild_transcript_with_translations(entries: list[dict], translations: list
     return '\n'.join(output_lines)
 
 
-def update_docx_with_translation(service, file_id: str, translated_content: str) -> str | None:
+def update_docx_with_content(service, file_id: str, content: str, heading_text: str) -> str | None:
     """
-    Download existing .docx from Drive, append translated content as a new page,
+    Download existing .docx from Drive, append content as a new page with heading,
     re-upload in place. Returns webViewLink or None.
     """
     import io
@@ -627,13 +768,13 @@ def update_docx_with_translation(service, file_id: str, translated_content: str)
 
         # Add page break and heading
         doc.add_page_break()
-        heading = doc.add_heading('English version', level=1)
+        heading = doc.add_heading(heading_text, level=1)
         for run in heading.runs:
             run.font.name = "Montserrat"
             run._element.rPr.rFonts.set(qn('w:eastAsia'), 'Montserrat')
 
-        # Add translated content
-        p = doc.add_paragraph(translated_content)
+        # Add content
+        p = doc.add_paragraph(content)
         for run in p.runs:
             run.font.name = "Montserrat"
             run.font.size = Pt(14)
@@ -659,5 +800,15 @@ def update_docx_with_translation(service, file_id: str, translated_content: str)
         return updated.get('webViewLink')
 
     except Exception as e:
-        logging.error(f"Failed to update docx {file_id} with translation: {e}", exc_info=True)
+        logging.error(f"Failed to update docx {file_id}: {e}", exc_info=True)
         return None
+
+
+def update_docx_with_translation(service, file_id: str, translated_content: str) -> str | None:
+    """Append English translation to a Drive docx."""
+    return update_docx_with_content(service, file_id, translated_content, "English version")
+
+
+def update_docx_with_cleanup(service, file_id: str, cleaned_content: str) -> str | None:
+    """Append cleaned version to a Drive docx."""
+    return update_docx_with_content(service, file_id, cleaned_content, "Вичищена версія")

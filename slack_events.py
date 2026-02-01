@@ -17,9 +17,10 @@ from helpers import (
     transcribe_file, get_thread_ts, cleanup_temp_file,
     create_srt_from_json, create_transcript,
     get_google_drive_service, find_or_create_folder, upload_as_google_doc,
-    get_or_create_shared_drive, update_docx_with_translation,
+    get_or_create_shared_drive, update_docx_with_translation, update_docx_with_cleanup,
     parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations,
-    parse_transcript_content, rebuild_transcript_with_translations
+    parse_transcript_content, rebuild_transcript_with_translations,
+    clean_texts_with_openai
 )
 from file_mappings import save_file_mapping, get_drive_file_id
 
@@ -367,23 +368,25 @@ async def handle_file_shared_events(event, client):
             logging.info(f"Timer started for batch {batch_key}. Will process in {BATCH_WINDOW_SECONDS}s.")
 
 
-# --- Translation via Emoji Reactions ---
+# --- Translation and Cleanup via Emoji Reactions ---
 ENGLISH_FLAG_EMOJIS = {"flag-gb", "flag-us", "flag-england", "gb", "us", "uk"}
-processed_translation_requests = set()
+CLEANUP_EMOJIS = {"broom"}
+ALL_PROCESSING_EMOJIS = ENGLISH_FLAG_EMOJIS | CLEANUP_EMOJIS
+processed_reaction_requests = set()
 
 
 @app.event("reaction_added")
 async def handle_reaction_added(event, client):
-    """Handle emoji reactions for translation requests."""
+    """Handle emoji reactions for translation and cleanup requests."""
     reaction = event.get("reaction", "")
     user_id = event.get("user")
     item = event.get("item", {})
 
     logging.info(f"[reaction] Received reaction: '{reaction}' from user {user_id}")
 
-    # Only process English flag emojis
-    if reaction not in ENGLISH_FLAG_EMOJIS:
-        logging.info(f"[reaction] Ignoring reaction '{reaction}' - not in {ENGLISH_FLAG_EMOJIS}")
+    # Only process known emojis
+    if reaction not in ALL_PROCESSING_EMOJIS:
+        logging.info(f"[reaction] Ignoring reaction '{reaction}' - not in {ALL_PROCESSING_EMOJIS}")
         return
 
     # Only process reactions on messages
@@ -396,14 +399,16 @@ async def handle_reaction_added(event, client):
     if not channel_id or not message_ts:
         return
 
-    # Create a unique key for this translation request
-    translation_key = f"{channel_id}:{message_ts}:{reaction}"
-    if translation_key in processed_translation_requests:
-        logging.info(f"Translation request {translation_key} already processed. Skipping.")
+    # Create a unique key for this request
+    request_key = f"{channel_id}:{message_ts}:{reaction}"
+    if request_key in processed_reaction_requests:
+        logging.info(f"Reaction request {request_key} already processed. Skipping.")
         return
-    processed_translation_requests.add(translation_key)
+    processed_reaction_requests.add(request_key)
 
-    logging.info(f"[translation] Received {reaction} emoji on message {message_ts} in {channel_id}")
+    is_cleanup = reaction in CLEANUP_EMOJIS
+    action_name = "cleanup" if is_cleanup else "translation"
+    logging.info(f"[{action_name}] Received {reaction} emoji on message {message_ts} in {channel_id}")
 
     try:
         # Check if the bot is in this channel before doing anything
@@ -456,41 +461,57 @@ async def handle_reaction_added(event, client):
 
         thread_ts = message.get("thread_ts") or message_ts
 
-        logging.info(f"[translation] Message ts: {message.get('ts')}, looking for: {message_ts}")
-        logging.info(f"[translation] Message files: {[f.get('name') for f in message.get('files', [])]}")
+        logging.info(f"[{action_name}] Message ts: {message.get('ts')}, looking for: {message_ts}")
+        logging.info(f"[{action_name}] Message files: {[f.get('name') for f in message.get('files', [])]}")
 
         # Check if this message is in a thread (not the parent message)
         if not thread_ts or thread_ts == message_ts:
-            logging.info(f"[translation] Message {message_ts} is not in a thread. Ignoring.")
+            logging.info(f"[{action_name}] Message {message_ts} is not in a thread. Ignoring.")
+            action_word = "вичищення" if is_cleanup else "переклад"
             await client.chat_postMessage(
                 channel=channel_id,
-                text=":no_good: Сорі, переклад працює лише в треді. Постав емоджі на повідомлення з файлом всередині треду.",
+                text=f":no_good: Сорі, {action_word} працює лише в треді. Постав емоджі на повідомлення з файлом всередині треду.",
                 thread_ts=message_ts
             )
             return
 
-        # Look for translatable files in the message
+        # Look for processable files in the message
         files = message.get("files", [])
         srt_files = [f for f in files if f.get("name", "").lower().endswith(".srt")]
         txt_files = [f for f in files if f.get("name", "").lower().endswith(".txt")]
 
-        if srt_files:
-            for srt_file in srt_files:
-                await process_srt_translation(srt_file, channel_id, thread_ts, client)
-        elif txt_files:
-            for txt_file in txt_files:
-                await process_txt_translation(txt_file, channel_id, thread_ts, client)
+        if is_cleanup:
+            # Cleanup only works on .txt files
+            if txt_files:
+                for txt_file in txt_files:
+                    await process_txt_cleanup(txt_file, channel_id, thread_ts, client)
+            else:
+                logging.info(f"[cleanup] No .txt files found in message {message_ts}")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=":no_good: Сорі, вичищення працює лише з `.txt` файлами розшифровок.",
+                    thread_ts=thread_ts
+                )
+                return
         else:
-            logging.info(f"[translation] No .srt or .txt files found in message {message_ts}")
-            await client.chat_postMessage(
-                channel=channel_id,
-                text=":no_good: Сорі, це не файл для перекладу. Мені потрібен файл з розширенням `.srt` або `.txt`.",
-                thread_ts=thread_ts
-            )
-            return
+            # Translation works on both .srt and .txt
+            if srt_files:
+                for srt_file in srt_files:
+                    await process_srt_translation(srt_file, channel_id, thread_ts, client)
+            elif txt_files:
+                for txt_file in txt_files:
+                    await process_txt_translation(txt_file, channel_id, thread_ts, client)
+            else:
+                logging.info(f"[translation] No .srt or .txt files found in message {message_ts}")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=":no_good: Сорі, це не файл для перекладу. Мені потрібен файл з розширенням `.srt` або `.txt`.",
+                    thread_ts=thread_ts
+                )
+                return
 
     except Exception as e:
-        logging.error(f"[translation] Error handling reaction: {e}", exc_info=True)
+        logging.error(f"[{action_name}] Error handling reaction: {e}", exc_info=True)
 
 
 async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: str, client):
@@ -504,7 +525,7 @@ async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: s
     # Send confirmation message
     await client.chat_postMessage(
         channel=channel_id,
-        text=f":saluting_face: Забираю в роботу переклад субтитрів `{file_name}`. Відпишу тобі, коли буду готовий.",
+        text=f":saluting_face: Дістаю словничок і йду перекладать субтитри для файлу `{file_name}`. Відпишу тобі, коли буду готовий.",
         thread_ts=thread_ts
     )
 
@@ -577,7 +598,7 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
     # Send confirmation message
     await client.chat_postMessage(
         channel=channel_id,
-        text=f":saluting_face: Забираю в роботу переклад розшифровки `{file_name}`. Відпишу тобі, коли буде готово.",
+        text=f":saluting_face: Дістаю словничок і йду перекладать файл `{file_name}`. Відпишу тобі, коли буду готовий.",
         thread_ts=thread_ts
     )
 
@@ -643,7 +664,7 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
                         if doc_link:
                             await client.chat_postMessage(
                                 channel=channel_id,
-                                text=f":open_file_folder: Я також поклав переклад у оригінальний <{doc_link}|документ на Google Drive>.",
+                                text=f":open_file_folder: Я також поклав переклад в оригінальний <{doc_link}|документ на Google Drive>.",
                                 thread_ts=thread_ts
                             )
                             logging.info(f"[txt-translation:{file_id}] Updated Drive doc successfully")
@@ -655,7 +676,7 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
                 logging.info(f"[txt-translation:{file_id}] No Drive mapping found")
                 await client.chat_postMessage(
                     channel=channel_id,
-                    text=":card_index: Сорі, я не знайшов документ на Google Drive для цієї розшифровки, тому переклад покладв лише у тред.",
+                    text=":card_index: Сорі, я не знайшов документ на Google Drive для цієї розшифровки, тому переклад поклав лише у тред.",
                     thread_ts=thread_ts
                 )
 
@@ -666,5 +687,107 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
         await client.chat_postMessage(
             channel=channel_id,
             text=f":expressionless: Сорі, мені не вдалося перекласти `{file_name}`. Помилка: {e}",
+            thread_ts=thread_ts
+        )
+
+
+async def process_txt_cleanup(file_info: dict, channel_id: str, thread_ts: str, client):
+    """Download, clean up filler words, and upload a .txt transcript file."""
+    file_id = file_info.get("id")
+    file_name = file_info.get("name", "transcript.txt")
+    base_name = Path(file_name).stem
+
+    logging.info(f"[cleanup:{file_id}] Starting cleanup for {file_name}")
+
+    await client.chat_postMessage(
+        channel=channel_id,
+        text=f":broom: Пішов мести мітлою файл `{file_name}`. Відпишу тобі, коли буду готовий.",
+        thread_ts=thread_ts
+    )
+
+    try:
+        fresh_file_info = (await client.files_info(file=file_id))["file"]
+        url_private = fresh_file_info.get("url_private")
+
+        if not url_private:
+            raise ValueError("Could not get file download URL")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            local_path = temp_dir_path / file_name
+
+            logging.info(f"[cleanup:{file_id}] Downloading file")
+            await download_file_streamed(url_private, local_path, client.token)
+
+            async with aiofiles.open(local_path, "r", encoding="utf-8") as f:
+                txt_content = await f.read()
+
+            logging.info(f"[cleanup:{file_id}] Parsing transcript content")
+            entries = parse_transcript_content(txt_content)
+
+            if not entries:
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=f":no_good: Сорі, не вдалося зчитати файл `{file_name}`. Це не схоже на мою розшифровку. Я лиш в свої умію.",
+                    thread_ts=thread_ts
+                )
+                return
+
+            texts = [entry["text"] for entry in entries]
+            logging.info(f"[cleanup:{file_id}] Cleaning {len(texts)} transcript entries")
+            cleaned_texts = await clean_texts_with_openai(texts)
+
+            logging.info(f"[cleanup:{file_id}] Rebuilding transcript with cleaned text")
+            cleaned_txt = rebuild_transcript_with_translations(entries, cleaned_texts)
+
+            cleaned_filename = f"{base_name}-clean.txt"
+            cleaned_path = temp_dir_path / cleaned_filename
+
+            async with aiofiles.open(cleaned_path, "w", encoding="utf-8") as f:
+                await f.write(cleaned_txt)
+
+            logging.info(f"[cleanup:{file_id}] Uploading cleaned file")
+            await client.files_upload_v2(
+                channel=channel_id,
+                file=str(cleaned_path),
+                title=cleaned_filename,
+                initial_comment=f":sparkles: Все вийшло, ось вичищена розшифровка для файлу `{file_name}`.",
+                thread_ts=thread_ts
+            )
+
+            # Try to update the corresponding Google Drive document
+            drive_file_id = get_drive_file_id(file_id)
+            if drive_file_id:
+                logging.info(f"[cleanup:{file_id}] Found Drive mapping: {drive_file_id}")
+                try:
+                    drive_service = get_google_drive_service()
+                    if drive_service:
+                        doc_link = update_docx_with_cleanup(drive_service, drive_file_id, cleaned_txt)
+                        if doc_link:
+                            await client.chat_postMessage(
+                                channel=channel_id,
+                                text=f":open_file_folder: Я також поклав почищену версію в оригінальний <{doc_link}|документ на Google Drive>.",
+                                thread_ts=thread_ts
+                            )
+                            logging.info(f"[cleanup:{file_id}] Updated Drive doc successfully")
+                        else:
+                            logging.warning(f"[cleanup:{file_id}] Failed to update Drive doc")
+                except Exception as e:
+                    logging.error(f"[cleanup:{file_id}] Error updating Drive doc: {e}")
+            else:
+                logging.info(f"[cleanup:{file_id}] No Drive mapping found")
+                await client.chat_postMessage(
+                    channel=channel_id,
+                    text=":card_index: Сорі, я не знайшов документ на Google Drive для цієї розшифровки, тому почищену версію поклав лише у тред.",
+                    thread_ts=thread_ts
+                )
+
+            logging.info(f"[cleanup:{file_id}] Cleanup complete")
+
+    except Exception as e:
+        logging.error(f"[cleanup:{file_id}] Error: {e}", exc_info=True)
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f":pensive: Сорі, не вдалося вичистити `{file_name}`. Помилка: {e}",
             thread_ts=thread_ts
         )

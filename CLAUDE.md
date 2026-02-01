@@ -98,6 +98,22 @@ Users can translate `.srt` subtitle files or `.txt` transcript files to English 
 **Google Drive Integration for Translations:**
 When translating a `.txt` transcript, the bot also updates the corresponding Google Drive `.docx` document by appending the English translation as a new page. This uses the file mappings system (see below).
 
+## Cleanup (Filler Word Removal) via Emoji Reactions
+
+Users can clean up `.txt` transcript files by adding a 🧹 (broom) emoji reaction to a message containing the file **within a thread**.
+
+**What it does:**
+- Removes filler words: "ну", "еее", "типу", "коротше", "скажем так", "от", "вот"
+- Removes hesitation sounds: "ммм", "хм", "и-и", "а-а"
+- Fixes Russian-isms to proper Ukrainian
+- Does NOT change meaning, add content, or alter the speaker's voice
+
+**Output:** `{filename}-clean.txt`
+
+**Implementation Principle:** Same as translation — LLM handles only the text cleanup, Python handles all structure (timestamps, speakers, reassembly). The LLM receives plain text segments and returns cleaned segments.
+
+**Key function:** `helpers.py:clean_texts_with_openai()` - Uses `CLEANUP_SYSTEM_PROMPT` with strict instructions on what to remove vs preserve.
+
 ## File Mappings (Slack-to-Drive)
 
 The bot maintains a JSON file mapping Slack file IDs to Google Drive file IDs. This enables finding the Drive document when a user requests translation of a `.txt` file.
