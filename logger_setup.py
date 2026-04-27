@@ -3,7 +3,7 @@ from logging.handlers import RotatingFileHandler
 from pathlib import Path
 
 LOG_FORMAT = '%(asctime)s [%(levelname)s] %(message)s'
-LOG_FILE = Path("/app/bot.log")
+LOG_FILE = Path("/app/data/bot.log")
 
 logger = logging.getLogger()
 logger.setLevel(logging.INFO)

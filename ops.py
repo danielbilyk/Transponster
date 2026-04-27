@@ -11,7 +11,7 @@ router = APIRouter(prefix="/ops", tags=["ops"])
 
 OPS_BEARER_TOKEN = os.getenv("OPS_BEARER_TOKEN", "")
 GIT_SHA = os.getenv("GIT_SHA", "unknown")
-LOG_FILE = Path("/app/bot.log")
+LOG_FILE = Path("/app/data/bot.log")
 TMP_DIR = Path("/tmp")
 
 
