@@ -6,8 +6,9 @@ import os
 from contextlib import asynccontextmanager
 
 # Import the async app object and the correct handler for FastAPI
-from slack_events import app 
+from slack_events import app
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
+from ops import router as ops_router
 
 # --- Lifespan Event Handler ---
 @asynccontextmanager
@@ -26,7 +27,7 @@ async def lifespan(api_app: FastAPI):
             logging.error(f"Failed to send startup message: {e}")
     else:
         logging.warning("SLACK_STARTUP_CHANNEL not set; skipping startup ping.")
-    
+
     yield # The application runs while the lifespan manager is in this 'yield' state
 
     # This block runs on shutdown
@@ -36,6 +37,7 @@ async def lifespan(api_app: FastAPI):
 # --- FastAPI Setup ---
 api = FastAPI(lifespan=lifespan)
 handler = AsyncSlackRequestHandler(app)
+api.include_router(ops_router)
 
 @api.get("/")
 async def github_redirect():
