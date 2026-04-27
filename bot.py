@@ -9,6 +9,7 @@ from contextlib import asynccontextmanager
 from slack_events import app
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from ops import router as ops_router
+from api_transcribe import router as api_transcribe_router
 
 # --- Lifespan Event Handler ---
 @asynccontextmanager
@@ -38,6 +39,7 @@ async def lifespan(api_app: FastAPI):
 api = FastAPI(lifespan=lifespan)
 handler = AsyncSlackRequestHandler(app)
 api.include_router(ops_router)
+api.include_router(api_transcribe_router)
 
 @api.get("/")
 async def github_redirect():
