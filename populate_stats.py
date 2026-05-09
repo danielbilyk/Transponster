@@ -138,13 +138,15 @@ def main():
 
     for f in files:
         name = f["name"]
-        # Skip translated/cleaned versions
         stem_lower = name.lower()
-        if stem_lower.endswith("-eng.docx") or stem_lower.endswith("-clean.docx"):
-            continue
 
-        # The original audio filename isn't stored on Drive, but the docx name
-        # mirrors the audio stem. Use it as-is.
+        if stem_lower.endswith("-eng.docx"):
+            mode = "translation"
+        elif stem_lower.endswith("-clean.docx"):
+            mode = "cleanup"
+        else:
+            mode = "txt_only"
+
         if name in existing:
             skipped += 1
             continue
@@ -164,7 +166,7 @@ def main():
                 username=username,
                 channel_id="",
                 filename=name,
-                mode="txt_only",
+                mode=mode,
                 file_size=0,
                 timestamp=timestamp,
             )
