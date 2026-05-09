@@ -593,6 +593,13 @@ async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: s
                 thread_ts=thread_ts
             )
 
+            record_transcription(
+                user_id="unknown",
+                username="",
+                channel_id=channel_id,
+                filename=file_name,
+                mode="translation",
+            )
             logging.info(f"[translation:{file_id}] Translation complete")
 
     except Exception as e:
@@ -697,6 +704,13 @@ async def process_txt_translation(file_info: dict, channel_id: str, thread_ts: s
                     thread_ts=thread_ts
                 )
 
+            record_transcription(
+                user_id="unknown",
+                username="",
+                channel_id=channel_id,
+                filename=file_name,
+                mode="translation",
+            )
             logging.info(f"[txt-translation:{file_id}] Translation complete")
 
     except Exception as e:
@@ -799,6 +813,13 @@ async def process_txt_cleanup(file_info: dict, channel_id: str, thread_ts: str, 
                     thread_ts=thread_ts
                 )
 
+            record_transcription(
+                user_id="unknown",
+                username="",
+                channel_id=channel_id,
+                filename=file_name,
+                mode="cleanup",
+            )
             logging.info(f"[cleanup:{file_id}] Cleanup complete")
 
     except Exception as e:
