@@ -10,12 +10,14 @@ from slack_events import app
 from slack_bolt.adapter.fastapi.async_handler import AsyncSlackRequestHandler
 from ops import router as ops_router
 from api_transcribe import router as api_transcribe_router
+from stats import init_db
 
 # --- Lifespan Event Handler ---
 @asynccontextmanager
 async def lifespan(api_app: FastAPI):
     # This block runs on startup
     logging.info("Application startup...")
+    init_db()
     SLACK_STARTUP_CHANNEL = os.getenv("SLACK_STARTUP_CHANNEL")
     if SLACK_STARTUP_CHANNEL:
         try:

@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request, status
+from stats import get_stats
 
 router = APIRouter(prefix="/ops", tags=["ops"])
 
@@ -118,6 +119,14 @@ async def cleanup_tmp(
         "removed": removed,
         "errors": errors,
     }
+
+
+@router.get("/stats")
+async def stats(
+    year: int | None = Query(None, ge=2024, le=2100),
+    _: None = Depends(require_bearer),
+):
+    return get_stats(year)
 
 
 def _bytes_summary(usage):
