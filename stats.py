@@ -80,7 +80,7 @@ def get_stats(year: int | None = None) -> dict:
     by_user = conn.execute(
         f"""SELECT username, user_id, COUNT(*) as count
             FROM transcriptions {where}
-            GROUP BY user_id ORDER BY count DESC""",
+            GROUP BY COALESCE(NULLIF(username, ''), user_id) ORDER BY count DESC""",
         params,
     ).fetchall()
 
