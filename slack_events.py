@@ -23,6 +23,7 @@ from helpers import (
     clean_texts_with_openai
 )
 from file_mappings import save_file_mapping, get_drive_file_id
+from stats import record_transcription
 
 # --- Async Setup ---
 blocking_task_executor = ThreadPoolExecutor(max_workers=os.cpu_count() or 4)
@@ -263,6 +264,22 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             logging.info(f"[{file_id}] Determined transcription mode: {mode}")
 
             base_filename = Path(file_info["name"]).stem
+
+            # Resolve username for stats
+            try:
+                _user_info = await client.users_info(user=user_id)
+                _username = _user_info['user']['profile']['display_name'] or _user_info['user']['name']
+            except Exception:
+                _username = user_id
+            record_transcription(
+                user_id=user_id,
+                username=_username,
+                channel_id=channel_id,
+                filename=file_info.get("name", ""),
+                mode=mode,
+                file_size=file_info.get("size", 0),
+            )
+
             logging.info(f"[{file_id}] 7: Generating and uploading results.")
             await generate_and_upload_results(mode, base_filename, transcription_result, file_info, user_id, channel_id, thread_ts, client, batch_context=batch_context)
 
