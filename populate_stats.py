@@ -55,22 +55,46 @@ def list_drive_transcripts(service, shared_drive_id: str, year: int) -> list[dic
     return files
 
 
-def resolve_folder_name(service, folder_id: str, cache: dict) -> str:
-    """Get the name of a folder (used as username). Results are cached."""
+def resolve_top_level_folder(service, folder_id: str, shared_drive_id: str, cache: dict) -> str:
+    """Walk up the folder tree to find the top-level folder name (directly under the shared drive)."""
     if folder_id in cache:
         return cache[folder_id]
-    try:
-        folder = service.files().get(
-            fileId=folder_id,
-            fields="name",
-            supportsAllDrives=True,
-        ).execute()
-        name = folder.get("name", "unknown")
-    except Exception as e:
-        logging.warning(f"Could not resolve folder {folder_id}: {e}")
-        name = "unknown"
-    cache[folder_id] = name
-    return name
+
+    original_id = folder_id
+    chain = []
+
+    while True:
+        if folder_id in cache:
+            name = cache[folder_id]
+            for fid in chain:
+                cache[fid] = name
+            cache[original_id] = name
+            return name
+
+        try:
+            item = service.files().get(
+                fileId=folder_id,
+                fields="name, parents",
+                supportsAllDrives=True,
+            ).execute()
+        except Exception as e:
+            logging.warning(f"Could not resolve folder {folder_id}: {e}")
+            for fid in chain:
+                cache[fid] = "unknown"
+            cache[original_id] = "unknown"
+            return "unknown"
+
+        parents = item.get("parents", [])
+        if not parents or parents[0] == shared_drive_id:
+            name = item.get("name", "unknown")
+            for fid in chain:
+                cache[fid] = name
+            cache[original_id] = name
+            cache[folder_id] = name
+            return name
+
+        chain.append(folder_id)
+        folder_id = parents[0]
 
 
 def main():
@@ -126,7 +150,7 @@ def main():
             continue
 
         parent_id = f.get("parents", [None])[0]
-        username = resolve_folder_name(drive_service, parent_id, folder_cache) if parent_id else "unknown"
+        username = resolve_top_level_folder(drive_service, parent_id, shared_drive_id, folder_cache) if parent_id else "unknown"
 
         created = f.get("createdTime", "")
         # createdTime is like "2026-03-15T14:22:33.000Z" — trim to ISO
