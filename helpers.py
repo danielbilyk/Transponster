@@ -97,7 +97,8 @@ def create_transcript(transcription_result):
 
 def create_srt_from_json(transcript_json: dict,
                          max_chars: int = 40,
-                         max_duration: float = 4.0) -> str:
+                         max_duration: float = 4.0,
+                         polish: bool = False) -> str:
     """
     Build an SRT file from word-level JSON:
      - Gather words until you hit:
@@ -105,8 +106,19 @@ def create_srt_from_json(transcript_json: dict,
         • OR accumulated text length > max_chars,
         • OR time span > max_duration seconds
      - Then flush that buffer as one subtitle block.
+
+    polish=True (коротульки, filename-marked): editorial rules applied at the
+    SOURCE, where every word still has its own timestamp — a cue never ends on
+    a hanging particle («не», «бо» — вони міняють сенс, Olha Krysa 2026-07-10),
+    text gets книга→книжка / КК branding / no final periods, and each cue is
+    laid out on ≤2 lines with no orphan word. See srt_polish.py.
     Returns the full SRT as a single string.
     """
+    from srt_polish import _is_hanging, layout_cue, merge_tiny_segments, polish_text
+
+    # allow a cue to run slightly long rather than end on a hanging word
+    overflow_chars = 15 if polish else 0
+
     segments = []
     buf = []
 
@@ -119,7 +131,13 @@ def create_srt_from_json(transcript_json: dict,
 
         # should we cut here?
         ends_sentence = buf[-1]["text"].rstrip().endswith((".", "!", "?"))
-        if ends_sentence or len(text) >= max_chars or duration >= max_duration:
+        want_cut = ends_sentence or len(text) >= max_chars or duration >= max_duration
+        if want_cut and polish and _is_hanging(buf[-1]["text"]):
+            # a hanging word must not end a cue: keep gathering (word-level
+            # timing keeps the next cue exact) unless we're far over budget
+            if len(text) < max_chars + overflow_chars and not ends_sentence:
+                want_cut = False
+        if want_cut:
             segments.append(buf)
             buf = []
 
@@ -127,12 +145,25 @@ def create_srt_from_json(transcript_json: dict,
     if buf:
         segments.append(buf)
 
+    if polish:
+        # a cue must never END on a hanging word even when the overflow budget
+        # ran out — move it (with its exact word timing) to the next segment.
+        # Move BEFORE merging: the move can shrink a donor to a single word,
+        # and merge_tiny_segments folds such cues away without re-creating
+        # hanging tails (a merged cue inherits the non-hanging tail).
+        for i in range(len(segments) - 1):
+            while len(segments[i]) > 1 and _is_hanging(segments[i][-1]["text"]):
+                segments[i + 1].insert(0, segments[i].pop())
+        segments = merge_tiny_segments(segments)
+
     # now render SRT
     out_lines = []
     for idx, seg in enumerate(segments, start=1):
         start_ts = format_timestamp(seg[0]["start"])
         end_ts   = format_timestamp(seg[-1]["end"])
         line_txt = " ".join([w["text"].strip() for w in seg]).strip()
+        if polish:
+            line_txt = layout_cue(polish_text(line_txt), max_line=max_chars)
 
         out_lines.append(str(idx))
         out_lines.append(f"{start_ts} --> {end_ts}")

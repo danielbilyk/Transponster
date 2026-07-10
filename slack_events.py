@@ -12,6 +12,7 @@ import aiofiles
 from slack_bolt.async_app import AsyncApp
 
 from config import SLACK_BOT_TOKEN, SLACK_SIGNING_SECRET, DEBUG, DEBUG_GDRIVE
+from srt_polish import is_korotulka_filename
 from helpers import (
     is_audio_or_video, file_too_large, SUPPORTED_EXTENSIONS,
     transcribe_file, get_thread_ts, cleanup_temp_file,
@@ -79,14 +80,14 @@ async def run_transcription(local_path: Path) -> dict:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(blocking_task_executor, transcribe_file, str(local_path))
 
-async def generate_and_upload_results(mode: str, base_filename: str, result_data: dict, file_info: dict, user_id: str, channel_id: str, thread_ts: str, client, batch_context=None):
+async def generate_and_upload_results(mode: str, base_filename: str, result_data: dict, file_info: dict, user_id: str, channel_id: str, thread_ts: str, client, batch_context=None, polish: bool = False):
     temp_files_to_clean = []
 
     try:
         if mode in ("srt_only", "both"):
             logging.info(f"[{file_info['id']}] 6a: Generating .srt file.")
             srt_path = Path(tempfile.gettempdir()) / f"{base_filename}.srt"
-            srt_text = create_srt_from_json(result_data, max_chars=40, max_duration=4.0)
+            srt_text = create_srt_from_json(result_data, max_chars=40, max_duration=4.0, polish=polish)
             async with aiofiles.open(srt_path, "w", encoding="utf-8") as f:
                 await f.write(srt_text)
             temp_files_to_clean.append(srt_path)
@@ -259,9 +260,10 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             logging.info(f"[{file_id}] 6: Processing transcription result.")
             filename_lower = file_info["name"].lower()
             mode = "txt_only"
-            if "subtitles" in filename_lower or "субтитри" in filename_lower: mode = "srt_only"
+            polish = is_korotulka_filename(file_info["name"])  # коротульки → editorial SRT rules
+            if polish or "subtitles" in filename_lower or "субтитри" in filename_lower: mode = "srt_only"
             elif "both" in filename_lower or "обидва" in filename_lower: mode = "both"
-            logging.info(f"[{file_id}] Determined transcription mode: {mode}")
+            logging.info(f"[{file_id}] Determined transcription mode: {mode} (polish={polish})")
 
             base_filename = Path(file_info["name"]).stem
 
@@ -281,7 +283,7 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             )
 
             logging.info(f"[{file_id}] 7: Generating and uploading results.")
-            await generate_and_upload_results(mode, base_filename, transcription_result, file_info, user_id, channel_id, thread_ts, client, batch_context=batch_context)
+            await generate_and_upload_results(mode, base_filename, transcription_result, file_info, user_id, channel_id, thread_ts, client, batch_context=batch_context, polish=polish)
 
     except Exception as e:
         logging.error(f"[{file_id}] An error occurred in async transcription flow: {e}", exc_info=True)

@@ -12,6 +12,7 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from srt_polish import is_korotulka_filename
 from helpers import (
     transcribe_file,
     create_transcript,
@@ -117,7 +118,8 @@ async def _run_job(job_id: str, req: TranscribeRequest):
         if req.mode in ("txt", "both"):
             txt_content = create_transcript(result_data)
         if req.mode in ("srt", "both"):
-            srt_content = create_srt_from_json(result_data, max_chars=40, max_duration=4.0)
+            srt_content = create_srt_from_json(result_data, max_chars=40, max_duration=4.0,
+                                               polish=is_korotulka_filename(req.filename))
 
         # 4. Google Drive upload (only when txt is produced)
         drive_doc_link: Optional[str] = None
