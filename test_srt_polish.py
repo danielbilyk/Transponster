@@ -3,6 +3,7 @@ import unittest
 from srt_polish import (
     fix_book_forms, fix_bookclub_branding, strip_final_period, fix_quotes,
     layout_cue, polish_srt, polish_text, is_korotulka_filename, parse_srt,
+    segment_words, split_sentences_in_cue,
 )
 
 
@@ -124,6 +125,76 @@ class PolishTextIntegrationTest(unittest.TestCase):
     def test_all_rules_together(self):
         got = polish_text('Обговорюємо книгу на "Книжковому клубі".')
         self.assertEqual(got, "Обговорюємо книжку на «Книжковому клубі від The Ukrainians Media»")
+
+
+class SegmentWordsTest(unittest.TestCase):
+    @staticmethod
+    def mk(sentence):
+        words, ts = [], 0.0
+        for w in sentence.split():
+            words.append({"text": w, "start": ts, "end": ts + 0.28})
+            ts += 0.3
+        return words
+
+    def test_sentence_tail_pulled_in(self):
+        # «Озрени Кебо.» must NOT spill into the next cue
+        ws = self.mk("Третя книжка — це «Сараєво для початківців» Озрени Кебо. "
+                     "Це документально-художня історія про життя в Сараєво.")
+        segs = segment_words(ws)
+        texts = [" ".join(w["text"] for w in s) for s in segs]
+        self.assertTrue(texts[0].endswith("Кебо."), texts)
+        self.assertTrue(texts[1].startswith("Це"), texts)
+
+    def test_never_two_sentences_in_one_cue(self):
+        ws = self.mk("Перше речення тут. Друге речення тут. Третє довше речення тут є.")
+        for s in segment_words(ws):
+            inner = [w["text"] for w in s[:-1]]
+            self.assertFalse(any(x.endswith(".") for x in inner), inner)
+
+    def test_mid_sentence_cut_prefers_comma(self):
+        ws = self.mk("Я всім, хто приходить в журналістику або кому цікаво, "
+                     "як працює журналістика, я раджу прочитати цю книгу.")
+        segs = segment_words(ws)
+        texts = [" ".join(w["text"] for w in s) for s in segs]
+        for txt in texts:
+            self.assertFalse(txt.rstrip(",.").split()[-1] == "або", texts)
+
+    def test_abo_is_hanging(self):
+        from srt_polish import _is_hanging
+        for w in ["або", "тобто", "якщо", "після"]:
+            self.assertTrue(_is_hanging(w), w)
+
+
+class SentenceSplitTest(unittest.TestCase):
+    def test_split_on_internal_period(self):
+        parts = split_sentences_in_cue("Озрени Кебо. Це документально-художня історія")
+        self.assertEqual(parts, ["Озрени Кебо.", "Це документально-художня історія"])
+
+    def test_no_split_without_capital(self):
+        parts = split_sentences_in_cue("озрени кебо. це історія")
+        self.assertEqual(len(parts), 1)
+
+    def test_abbrev_not_split(self):
+        parts = split_sentences_in_cue("та ін. Наступне речення")
+        self.assertEqual(len(parts), 1)
+
+    def test_polish_srt_splits_cue_with_interpolated_time(self):
+        srt = ("1\n00:01:47,720 --> 00:01:51,420\n"
+               "Озрени Кебо. Це документально-художня історія\n")
+        out = polish_srt(srt)
+        cues = parse_srt(out)
+        self.assertEqual(len(cues), 2)
+        self.assertEqual(cues[0]["text"], "Озрени Кебо")
+        self.assertTrue(cues[1]["text"].startswith("Це"))
+        self.assertTrue(out.startswith("1\n00:01:47,720 --> "))
+        self.assertIn("--> 00:01:51,420", out)
+
+    def test_no_newlines_in_cue_text(self):
+        srt = ("1\n00:00:01,000 --> 00:00:04,000\n"
+               "довше речення яке раніше розбивалось на два рядки а тепер ні\n")
+        cues = parse_srt(polish_srt(srt))
+        for c in cues:
+            self.assertNotIn("\n", c["text"])
 
 
 class NamingSchemeTest(unittest.TestCase):

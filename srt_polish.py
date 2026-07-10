@@ -10,14 +10,16 @@ Rules (from Dani + Olha Krysa, 2026-07-10):
   2. every «Книжковий клуб» mention → «Книжковий клуб від The Ukrainians Media»
      (idempotent)
   3. no sentence-final periods (…, ?!, abbreviations untouched)
-  4. ≤2 lines per cue, ~40 chars each
-  5. no hanging particles/conjunctions/prepositions at line end («не», «бо»,
-     «і», «в»… — вони міняють сенс і висять; переносити далі). Cross-cue: a cue
-     must not END on such a word either — it moves to the next cue.
-  6. no single-word orphan as the last line of a cue
+  4. cues align to SENTENCE boundaries where the STT put punctuation
+     (never two sentences in one cue; short sentence tails pulled in)
+  5. no hanging particles/conjunctions/prepositions at cue end («не», «бо»,
+     «або»… — вони міняють сенс і висять) — the word moves to the next cue
+  6. no single-word cues (merged into a neighbour)
   7. ukrainian «» quotes
+  8. NO manual line breaks inside a cue — Adobe Premiere wraps lines itself
+     (Dani, 2026-07-10); layout_cue kept only as an optional utility
 
-VERSION: 2026-07-10.2
+VERSION: 2026-07-10.3
 """
 from __future__ import annotations
 
@@ -98,6 +100,9 @@ HANGING_WORDS = {
     "щоб", "коли", "де", "то", "же", "ж", "би", "б", "хоч", "аж", "у", "в",
     "з", "із", "зі", "на", "до", "від", "об", "по", "за", "під", "над", "при",
     "без", "про", "через", "для", "між", "крізь", "це", "той", "ця", "ці",
+    "або", "однак", "проте", "зате", "тобто", "себто", "ніби", "наче", "мов",
+    "немов", "якщо", "якби", "поки", "доки", "крім", "окрім", "біля", "коло",
+    "щодо", "задля", "попри", "серед", "перед", "після",
 }
 
 MAX_LINE = 40
@@ -193,6 +198,71 @@ def polish_text(text: str) -> str:
     return re.sub(r"\s+", " ", t).strip()
 
 
+# ── sentence-aware segmentation (word-level, generation time) ────────────────
+_SENT_END_RE = re.compile(r"[.!?…]+[»\")\]]*$")
+
+
+def _ends_sentence(text: str) -> bool:
+    t = text.rstrip()
+    if not _SENT_END_RE.search(t):
+        return False
+    core = t.rstrip('.!?…»")]')
+    core = core.rsplit(" ", 1)[-1]
+    return not (core.lower() in _ABBREV_TAILS or len(core) <= 1)
+
+
+def segment_words(words: list, max_chars: int = MAX_LINE, max_duration: float = 4.0,
+                  overflow_chars: int = 20, overflow_seconds: float = 1.5,
+                  min_chars: int = 12) -> list:
+    """Word-dicts ({'text','start','end'}) → cue segments, preferring sentence
+    boundaries («іноді треба все ж закінчувати наприкінці речення» — Dani).
+
+    Invariant: a cue never contains an INTERNAL sentence end. A short sentence
+    tail within the overflow budget is pulled INTO the cue instead of spilling
+    into the next one; when a mid-sentence cut is unavoidable it prefers
+    commas, avoids hanging words, and likes to start the next cue on a
+    capitalized word (likely sentence/name start)."""
+    ws = [w for w in words if w["text"].strip()]
+    segs, i, n = [], 0, len(ws)
+    while i < n:
+        # window of candidate words: up to the overflow budget, closed by the
+        # first sentence end (two sentences never share a cue)
+        j, tlen = i, 0
+        while j < n:
+            wlen = len(ws[j]["text"].strip()) + (1 if j > i else 0)
+            dur = ws[j]["end"] - ws[i]["start"]
+            if j > i and (tlen + wlen > max_chars + overflow_chars
+                          or dur > max_duration + overflow_seconds):
+                break
+            tlen += wlen
+            j += 1
+            if _ends_sentence(ws[j - 1]["text"]):
+                break
+        # pick the best cut k in (i, j]
+        best_k, best_score, tlen = j, None, 0
+        for k in range(i + 1, j + 1):
+            tlen += len(ws[k - 1]["text"].strip()) + (1 if k - 1 > i else 0)
+            dur = ws[k - 1]["end"] - ws[i]["start"]
+            score = -abs(tlen - max_chars) * 0.5
+            if _ends_sentence(ws[k - 1]["text"]) or k == n:
+                score += 1000
+            elif ws[k - 1]["text"].rstrip().endswith((",", ";", ":")):
+                score += 100
+            if k < n and ws[k]["text"].lstrip()[:1].isupper():
+                score += 40
+            if _is_hanging(ws[k - 1]["text"]):
+                score -= 500
+            if tlen > max_chars or dur > max_duration:
+                score -= 60   # overflow tolerated only for a good boundary
+            if tlen < min_chars:
+                score -= 200
+            if best_score is None or score > best_score:
+                best_k, best_score = k, score
+        segs.append(ws[i:best_k])
+        i = best_k
+    return segs
+
+
 # ── tiny-cue merge (word-level segments) ─────────────────────────────────────
 def merge_tiny_segments(segments: list, min_words: int = 2) -> list:
     """A cue of a single word («нема» flashing for half a second) is as bad as
@@ -214,11 +284,51 @@ def merge_tiny_segments(segments: list, min_words: int = 2) -> list:
     return out
 
 
+# ── internal sentence split (post-hoc path) ──────────────────────────────────
+_TS_ALL = re.compile(r"(\d{2}):(\d{2}):(\d{2})[,.](\d{3})")
+# «. Це» / «?» Наступне» — split AFTER end punctuation, only when the next
+# word starts uppercase or with « (so a raw run-on without a period is left
+# alone until someone — Anton's grammar pass — adds the period + capital)
+_SPLIT_RE = re.compile(r'[.!?…]+[»")\]]*\s+(?=[«"A-ZА-ЯІЇЄҐ])')
+
+
+def _time_bounds(time_line: str):
+    m = _TS_ALL.findall(time_line)
+    if len(m) < 2:
+        return None
+    to_ms = lambda g: ((int(g[0]) * 60 + int(g[1])) * 60 + int(g[2])) * 1000 + int(g[3])
+    return to_ms(m[0]), to_ms(m[1])
+
+
+def _fmt_ms(v: int) -> str:
+    h, r = divmod(int(v), 3600000)
+    mi, r = divmod(r, 60000)
+    s, ms = divmod(r, 1000)
+    return f"{h:02d}:{mi:02d}:{s:02d},{ms:03d}"
+
+
+def split_sentences_in_cue(text: str) -> list:
+    """Cue text → sentence parts (abbreviation-guarded). One part = no split."""
+    parts, last = [], 0
+    for m in _SPLIT_RE.finditer(text):
+        head = text[:m.end()].rstrip()
+        core = head.rstrip('.!?…»")]').rsplit(" ", 1)[-1]
+        if core.lower() in _ABBREV_TAILS or len(core) <= 1:
+            continue
+        parts.append(text[last:m.end()].strip())
+        last = m.end()
+    parts.append(text[last:].strip())
+    return [p for p in parts if p]
+
+
 # ── whole-file polish ────────────────────────────────────────────────────────
 def polish_srt(srt_text: str, max_line: int = MAX_LINE) -> str:
     """Arbitrary SRT → коротульки rules. Cross-cue: a cue must not END on a
     hanging word — the word moves to the FRONT of the next cue (approximate
-    timing; exact fix happens at generation time in Transponster)."""
+    timing; exact fix happens at generation time in Transponster). A cue that
+    contains an internal sentence end is SPLIT into one cue per sentence, time
+    interpolated proportionally to text length. Cue text stays on ONE line —
+    Premiere wraps it (max_line kept for signature compatibility)."""
     cues = parse_srt(srt_text)
     # cross-cue pass first (needs raw word streams)
     for i in range(len(cues) - 1):
@@ -229,13 +339,28 @@ def polish_srt(srt_text: str, max_line: int = MAX_LINE) -> str:
         if moved:
             cues[i]["text"] = " ".join(words)
             cues[i + 1]["text"] = (" ".join(moved) + " " + cues[i + 1]["text"]).strip()
-    # per-cue text polish + layout
+    # per-cue: split internal sentence ends → text polish + layout per part
     polished = []
     for c in cues:
-        text = polish_text(c["text"])
-        if not text:
-            continue  # cue emptied (e.g. was a lone particle) — drop it
-        polished.append({"time": c["time"], "text": layout_cue(text, max_line)})
+        parts = split_sentences_in_cue(c["text"])
+        bounds = _time_bounds(c["time"]) if len(parts) > 1 else None
+        if len(parts) > 1 and bounds:
+            start, end = bounds
+            total = sum(len(p) for p in parts) or 1
+            cursor = start
+            for idx, p in enumerate(parts):
+                p_end = end if idx == len(parts) - 1 else \
+                    cursor + round((end - start) * len(p) / total)
+                text = polish_text(p)
+                if text:
+                    polished.append({"time": f"{_fmt_ms(cursor)} --> {_fmt_ms(p_end)}",
+                                     "text": text})
+                cursor = p_end
+        else:
+            text = polish_text(c["text"])
+            if not text:
+                continue  # cue emptied (e.g. was a lone particle) — drop it
+            polished.append({"time": c["time"], "text": text})
     return serialize_srt(polished)
 
 
