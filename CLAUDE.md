@@ -150,6 +150,37 @@ hand-edited that document already.
 **Note:** the new `.txt` gets its own Slack→Drive mapping so that 🧹 and 🇬🇧 keep
 working on the corrected version.
 
+## Russian Drift Detection (`language_check.py`)
+
+After every transcription the bot checks whether the output drifted into Russian
+and, if so, posts a hint suggesting the 🇺🇦 reaction. It never re-transcribes on
+its own — the default path and its cost stay exactly as they were.
+
+**The signal is orthographic, not lexical:** four Cyrillic letters exist only in
+Russian (ы ъ э ё) and four only in Ukrainian (і ї є ґ). No word lists, no surzhyk
+heuristics.
+
+**Two things keep it precise:**
+- It classifies 50-word **chunks**, not the whole file. A transcript that goes
+  Russian for its last fifth still looks overwhelmingly Ukrainian in aggregate,
+  which is exactly what a global ratio misses.
+- It fires only on a **mix** — Ukrainian chunks *and* Russian chunks in the same
+  transcript. A recording that is Russian end to end is far more likely to be
+  genuinely Russian audio than a misdetection, so it stays silent there.
+
+Thresholds live at the top of `language_check.py` (≥2 Russian chunks and ≥10% of
+classified chunks). English and other non-Cyrillic audio classify as nothing and
+never trigger.
+
+**Key functions:**
+- `language_check.py:detect_russian_drift()` - returns a report or None
+- `language_check.py:classify_chunk()` - 'ru' / 'ua' / None for one chunk
+- `slack_events.py:warn_about_russian_drift()` - posts the hint; wrapped in a
+  catch-all so an advisory feature can never break delivery of a good transcript
+
+**Not called from the re-transcription path** — there the user has already forced
+Ukrainian, and telling them to force it again is noise.
+
 ## File Mappings (Slack-to-Drive)
 
 The bot maintains a JSON file mapping Slack file IDs to Google Drive file IDs. This enables finding the Drive document when a user requests translation of a `.txt` file.

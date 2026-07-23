@@ -110,6 +110,11 @@ transcript can come back in Russian.
 
 This is a fresh transcription, not a translation of the existing text.
 
+The bot also spots this on its own: after every transcription it checks whether
+the text drifted into Russian partway through, and if so posts a hint pointing at
+roughly where it starts, so nobody has to read the whole file to notice. It only
+ever suggests — re-transcribing stays a deliberate 🇺🇦 press.
+
 ---
 
 ## 🤖 Bot Setup

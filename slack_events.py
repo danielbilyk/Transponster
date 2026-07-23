@@ -25,6 +25,7 @@ from helpers import (
     parse_transcript_content, rebuild_transcript_with_translations,
     clean_texts_with_openai
 )
+from language_check import detect_russian_drift, format_offset
 from file_mappings import save_file_mapping, get_drive_file_id
 from stats import record_transcription
 
@@ -124,6 +125,39 @@ async def transcribe_with_retries(local_path: Path, file_name: str, user_id: str
             else:
                 raise  # Re-raise other HTTP errors to be caught by the generic handler
     return None
+
+async def warn_about_russian_drift(result_data: dict, file_info: dict, channel_id: str,
+                                   thread_ts: str, client):
+    """
+    Nudge the user toward 🇺🇦 when the transcript looks partly Russian.
+
+    Purely advisory — it never re-transcribes on its own, and it must never
+    break delivery of a transcript that is otherwise fine, hence the catch-all.
+    Deliberately not called from the re-transcription path: there the user has
+    already forced Ukrainian, and telling them to force it again is noise.
+    """
+    try:
+        drift = detect_russian_drift(result_data)
+        if not drift:
+            return
+
+        file_name = file_info.get("name", "")
+        offset = format_offset(drift["first_start"])
+        where = f" (десь від {offset})" if offset else ""
+        logging.info(
+            f"[{file_info.get('id')}] Russian drift detected in {file_name}: "
+            f"{drift['russian_chunks']}/{drift['russian_chunks'] + drift['ukrainian_chunks']} chunks"
+        )
+
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f":eyes: Здається, у розшифровку файлу `{file_name}` місцями заїхала російська{where} — "
+                 f"так буває, коли ElevenLabs сам вгадує мову. Постав :flag-ua: на неї або на сам "
+                 f"аудіофайл, і я перероблю з примусовою українською.",
+            thread_ts=thread_ts
+        )
+    except Exception as e:
+        logging.error(f"[{file_info.get('id')}] Russian drift check failed: {e}", exc_info=True)
 
 async def generate_and_upload_results(mode: str, base_filename: str, result_data: dict, file_info: dict, user_id: str, channel_id: str, thread_ts: str, client, batch_context=None, polish: bool = False):
     temp_files_to_clean = []
@@ -228,6 +262,8 @@ async def generate_and_upload_results(mode: str, base_filename: str, result_data
                 await client.chat_postMessage(channel=channel_id, text=message, thread_ts=thread_ts)
 
         logging.info(f"[{file_info['id']}] 8: Successfully uploaded results.")
+
+        await warn_about_russian_drift(result_data, file_info, channel_id, thread_ts, client)
 
     finally:
         for fpath in temp_files_to_clean:
