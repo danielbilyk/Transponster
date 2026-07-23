@@ -114,6 +114,42 @@ Users can clean up `.txt` transcript files by adding a 🧹 (broom) emoji reacti
 
 **Key function:** `helpers.py:clean_texts_with_openai()` - Uses `CLEANUP_SYSTEM_PROMPT` with strict instructions on what to remove vs preserve.
 
+## Re-transcription with Ukrainian Forced (🇺🇦 Reaction)
+
+By default `transcribe_file()` sends no `language_code`, so ElevenLabs predicts the
+language itself. Ukrainian and Russian are acoustically close, so on weak audio the
+prediction drifts and parts of a transcript come back in Russian.
+
+Reacting with 🇺🇦 (`flag-ua`, `ua`) re-runs the transcription with
+`language_code=ukr`. **This is a new transcription, not a translation** — the audio
+goes to ElevenLabs again, so it costs credits and takes as long as the first run.
+
+**Where the reaction can land:**
+- On the bot's transcript inside a thread → the bot walks the whole thread to find
+  the source media (scanning every message, not just the parent, because the media
+  may itself have been posted as a reply)
+- Directly on the original audio/video message → used as-is, no lookup
+
+**Matching transcript → media:** by filename stem, after stripping the bot's own
+suffixes (`-clean`, `-eng`, `-ukr`, which can stack). In a batch with several media
+files and no stem match, the bot refuses to guess and asks the user to react on the
+specific media message.
+
+**Output:** `{filename}-ukr.txt` or `{filename}-ukr.srt`, mirroring whichever format
+the reaction landed on. For `.txt`, the result is appended to the original Drive
+docx as a new page ("Українська версія") rather than replacing it — someone may have
+hand-edited that document already.
+
+**Key functions (`slack_events.py`):**
+- `handle_ukrainian_retranscription()` - resolves what to re-transcribe from where the emoji landed
+- `find_source_media()` - locates the source audio/video in a thread
+- `find_drive_file_id()` - finds the Drive doc, falling back to scanning the thread when the reaction was on media
+- `process_ukrainian_retranscription()` - downloads, transcribes, uploads, updates Drive
+- `transcribe_with_retries()` - shared 429/5xx retry loop, also used by the main flow
+
+**Note:** the new `.txt` gets its own Slack→Drive mapping so that 🧹 and 🇬🇧 keep
+working on the corrected version.
+
 ## File Mappings (Slack-to-Drive)
 
 The bot maintains a JSON file mapping Slack file IDs to Google Drive file IDs. This enables finding the Drive document when a user requests translation of a `.txt` file.

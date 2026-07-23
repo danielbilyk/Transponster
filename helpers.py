@@ -187,11 +187,13 @@ def file_too_large(fileinfo):
     size_bytes = fileinfo.get("size", 0)
     return size_bytes > 1000 * 1_000_000
 
-def transcribe_file(file_path: str, as_srt: bool = False):
+def transcribe_file(file_path: str, as_srt: bool = False, language_code: str | None = None):
     """
     Send `file_path` to ElevenLabs.
     - Returns JSON (dict) when as_srt=False (default).
     - Returns raw SRT text (str) when as_srt=True.
+    - `language_code` is an ISO-639-1/639-3 code. When None (the default) the
+      parameter is omitted entirely and ElevenLabs predicts the language itself.
     """
     headers = {"xi-api-key": ELEVENLABS_API_KEY}
     data = {
@@ -199,6 +201,8 @@ def transcribe_file(file_path: str, as_srt: bool = False):
         "tag_audio_events": ELEVENLABS_TAG_AUDIO_EVENTS,
         "diarize": ELEVENLABS_DIARIZE,
     }
+    if language_code:
+        data["language_code"] = language_code
     if as_srt:
         # request raw SRT from the API
         data["srt"] = json.dumps({"format": "srt"})
@@ -832,3 +836,8 @@ def update_docx_with_translation(service, file_id: str, translated_content: str)
 def update_docx_with_cleanup(service, file_id: str, cleaned_content: str) -> str | None:
     """Append cleaned version to a Drive docx."""
     return update_docx_with_content(service, file_id, cleaned_content, "Вичищена версія")
+
+
+def update_docx_with_ukrainian(service, file_id: str, transcript_content: str) -> str | None:
+    """Append a re-transcription made with Ukrainian forced to a Drive docx."""
+    return update_docx_with_content(service, file_id, transcript_content, "Українська версія")

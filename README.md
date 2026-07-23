@@ -95,6 +95,23 @@ Transponster can translate `.srt` subtitle files to English using OpenAI.
 
 ---
 
+## 🇺🇦 Re-transcription with Ukrainian Forced
+
+By default the bot lets ElevenLabs detect the language on its own. Ukrainian and
+Russian are close enough that detection sometimes drifts mid-file, so parts of a
+transcript can come back in Russian.
+
+**How to use:**
+1. React with 🇺🇦 on the transcript (`.txt` or `.srt`) inside the thread, or
+   directly on the original audio/video message
+2. The bot finds the source media, transcribes it again with `language_code=ukr`,
+   and uploads `{filename}-ukr.txt` (or `-ukr.srt`) to the thread
+3. For `.txt`, the new version is also appended to the original Google Drive doc
+
+This is a fresh transcription, not a translation of the existing text.
+
+---
+
 ## 🤖 Bot Setup
 
 1. **Clone the Repository:**

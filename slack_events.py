@@ -5,6 +5,7 @@ import logging
 import tempfile
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from functools import partial
 import requests
 
 import aiohttp
@@ -19,6 +20,7 @@ from helpers import (
     create_srt_from_json, create_transcript,
     get_google_drive_service, find_or_create_folder, upload_as_google_doc,
     get_or_create_shared_drive, update_docx_with_translation, update_docx_with_cleanup,
+    update_docx_with_ukrainian,
     parse_srt_content, translate_texts_with_openai, rebuild_srt_with_translations,
     parse_transcript_content, rebuild_transcript_with_translations,
     clean_texts_with_openai
@@ -61,6 +63,14 @@ def is_text_file(filename: str) -> bool:
     """Check if file is a text/markdown file that shouldn't be transcribed."""
     return filename.lower().endswith((".txt", ".md"))
 
+async def resolve_username(user_id: str, client) -> str:
+    """Display name for stats, falling back to the raw ID if Slack won't say."""
+    try:
+        user_info = await client.users_info(user=user_id)
+        return user_info['user']['profile']['display_name'] or user_info['user']['name']
+    except Exception:
+        return user_id
+
 async def get_aiohttp_session():
     global aiohttp_session
     if aiohttp_session is None or aiohttp_session.closed:
@@ -76,9 +86,44 @@ async def download_file_streamed(url: str, local_path: Path, token: str):
             async for chunk in response.content.iter_chunked(8192):
                 await f.write(chunk)
 
-async def run_transcription(local_path: Path) -> dict:
+async def run_transcription(local_path: Path, language_code: str | None = None) -> dict:
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(blocking_task_executor, transcribe_file, str(local_path))
+    return await loop.run_in_executor(
+        blocking_task_executor,
+        partial(transcribe_file, str(local_path), language_code=language_code),
+    )
+
+async def transcribe_with_retries(local_path: Path, file_name: str, user_id: str, channel_id: str,
+                                  thread_ts: str, client, language_code: str | None = None):
+    """
+    Transcribe, retrying on 429/5xx. Posts its own progress and give-up messages.
+    Returns the transcription result, or None if every attempt failed.
+    """
+    for attempt in range(MAX_TRANSCRIPTION_RETRIES):
+        try:
+            return await run_transcription(local_path, language_code=language_code)
+        except requests.exceptions.HTTPError as e:
+            status = e.response.status_code if e.response is not None else None
+            if status == 429 or (status is not None and 500 <= status < 600):
+                if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
+                    logging.warning(f"Attempt {attempt + 1} failed for {file_name}: {e}. Retrying...")
+                    error_message = (
+                        f":expressionless: Сорі, щось пішло не так з файлом `{file_name}`. Помилка:\n\n"
+                        f"```{e}```\n"
+                        f"Я спробую ще раз і відпішу тобі."
+                    )
+                    await client.chat_postMessage(channel=channel_id, text=error_message, thread_ts=thread_ts)
+                    await asyncio.sleep(RETRY_DELAY_SECONDS)
+                else:
+                    logging.error(f"All retries failed for {file_name}: {e}.")
+                    final_error_message = (
+                        f":pensive: Сорі, я все одно не зміг обробити `{file_name}`.\n\n"
+                        f"<@{user_id}>, подивись у чому проблема, як матимеш можливість.")
+                    await client.chat_postMessage(channel=channel_id, text=final_error_message, thread_ts=thread_ts)
+                    return None
+            else:
+                raise  # Re-raise other HTTP errors to be caught by the generic handler
+    return None
 
 async def generate_and_upload_results(mode: str, base_filename: str, result_data: dict, file_info: dict, user_id: str, channel_id: str, thread_ts: str, client, batch_context=None, polish: bool = False):
     temp_files_to_clean = []
@@ -225,36 +270,13 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
 
             logging.info(f"[{file_id}] 5: Transcribing in background thread.")
 
-            transcription_result = None
-            for attempt in range(MAX_TRANSCRIPTION_RETRIES):
-                try:
-                    transcription_result = await run_transcription(local_file_path)
-                    break  # Success
-                except requests.exceptions.HTTPError as e:
-                    status = e.response.status_code if e.response is not None else None
-                    if status == 429 or (status is not None and 500 <= status < 600):
-                        file_name = file_info.get("name", file_id)
-                        if attempt < MAX_TRANSCRIPTION_RETRIES - 1:
-                            logging.warning(f"Attempt {attempt + 1} failed for {file_name}: {e}. Retrying...")
-                            error_message = (
-                                f":expressionless: Сорі, щось пішло не так з файлом `{file_name}`. Помилка:\n\n"
-                                f"```{e}```\n"
-                                f"Я спробую ще раз і відпішу тобі."
-                            )
-                            await client.chat_postMessage(channel=channel_id, text=error_message, thread_ts=thread_ts)
-                            await asyncio.sleep(RETRY_DELAY_SECONDS)
-                        else:
-                            logging.error(f"All retries failed for {file_name}: {e}.")
-                            final_error_message = (
-                                f":pensive: Сорі, я все одно не зміг обробити `{file_name}`.\n\n"
-                                f"<@{user_id}>, подивись у чому проблема, як матимеш можливість.")
-                            await client.chat_postMessage(channel=channel_id, text=final_error_message, thread_ts=thread_ts)
-                            return
-                    else:
-                        raise  # Re-raise other HTTP errors to be caught by the generic handler
+            transcription_result = await transcribe_with_retries(
+                local_file_path, file_info.get("name", file_id),
+                user_id, channel_id, thread_ts, client,
+            )
 
             if transcription_result is None:
-                logging.error(f"[{file_id}] Transcription failed after all retries, but no result was produced.")
+                logging.error(f"[{file_id}] Transcription failed after all retries.")
                 return
 
             logging.info(f"[{file_id}] 6: Processing transcription result.")
@@ -268,11 +290,7 @@ async def process_single_file(file_id: str, user_id: str, channel_id: str, threa
             base_filename = Path(file_info["name"]).stem
 
             # Resolve username for stats
-            try:
-                _user_info = await client.users_info(user=user_id)
-                _username = _user_info['user']['profile']['display_name'] or _user_info['user']['name']
-            except Exception:
-                _username = user_id
+            _username = await resolve_username(user_id, client)
             record_transcription(
                 user_id=user_id,
                 username=_username,
@@ -387,11 +405,35 @@ async def handle_file_shared_events(event, client):
             logging.info(f"Timer started for batch {batch_key}. Will process in {BATCH_WINDOW_SECONDS}s.")
 
 
-# --- Translation and Cleanup via Emoji Reactions ---
+# --- Translation, Cleanup and Re-transcription via Emoji Reactions ---
 ENGLISH_FLAG_EMOJIS = {"flag-gb", "flag-us", "flag-england", "gb", "us", "uk"}
 CLEANUP_EMOJIS = {"broom"}
-ALL_PROCESSING_EMOJIS = ENGLISH_FLAG_EMOJIS | CLEANUP_EMOJIS
+UKRAINIAN_FLAG_EMOJIS = {"flag-ua", "ua"}
+ALL_PROCESSING_EMOJIS = ENGLISH_FLAG_EMOJIS | CLEANUP_EMOJIS | UKRAINIAN_FLAG_EMOJIS
 processed_reaction_requests = set()
+
+UKRAINIAN_LANGUAGE_CODE = "ukr"
+# Suffixes the bot itself appends. Stripped when matching a transcript back to
+# the media it came from, so a reaction on `Interview-clean.txt` still finds
+# `Interview.m4a`.
+DERIVED_SUFFIXES = ("-clean", "-eng", "-ukr")
+
+
+def _forget_reaction_request(request_key: str):
+    """Drop the dedup key so the user can retry by re-adding the reaction."""
+    processed_reaction_requests.discard(request_key)
+
+
+def strip_derived_suffixes(stem: str) -> str:
+    """`Interview-clean-eng` → `Interview`. Suffixes can stack, so loop."""
+    changed = True
+    while changed:
+        changed = False
+        for suffix in DERIVED_SUFFIXES:
+            if stem.lower().endswith(suffix):
+                stem = stem[: -len(suffix)]
+                changed = True
+    return stem
 
 
 @app.event("reaction_added")
@@ -426,7 +468,8 @@ async def handle_reaction_added(event, client):
     processed_reaction_requests.add(request_key)
 
     is_cleanup = reaction in CLEANUP_EMOJIS
-    action_name = "cleanup" if is_cleanup else "translation"
+    is_retranscribe = reaction in UKRAINIAN_FLAG_EMOJIS
+    action_name = "cleanup" if is_cleanup else ("retranscribe" if is_retranscribe else "translation")
     logging.info(f"[{action_name}] Received {reaction} emoji on message {message_ts} in {channel_id}")
 
     try:
@@ -483,6 +526,15 @@ async def handle_reaction_added(event, client):
         logging.info(f"[{action_name}] Message ts: {message.get('ts')}, looking for: {message_ts}")
         logging.info(f"[{action_name}] Message files: {[f.get('name') for f in message.get('files', [])]}")
 
+        # Re-transcription is allowed both on a transcript inside a thread and
+        # directly on the original media message, so it runs before the
+        # thread-only guard the other two actions need.
+        if is_retranscribe:
+            await handle_ukrainian_retranscription(
+                message, message_ts, thread_ts, channel_id, user_id, client, request_key
+            )
+            return
+
         # Check if this message is in a thread (not the parent message)
         if not thread_ts or thread_ts == message_ts:
             logging.info(f"[{action_name}] Message {message_ts} is not in a thread. Ignoring.")
@@ -531,6 +583,9 @@ async def handle_reaction_added(event, client):
 
     except Exception as e:
         logging.error(f"[{action_name}] Error handling reaction: {e}", exc_info=True)
+        # An unexpected crash shouldn't burn the request key — let the user
+        # retry by removing and re-adding the emoji.
+        _forget_reaction_request(request_key)
 
 
 async def process_srt_translation(file_info: dict, channel_id: str, thread_ts: str, client):
@@ -829,5 +884,301 @@ async def process_txt_cleanup(file_info: dict, channel_id: str, thread_ts: str, 
         await client.chat_postMessage(
             channel=channel_id,
             text=f":pensive: Сорі, не вдалося вичистити `{file_name}`. Помилка: {e}",
+            thread_ts=thread_ts
+        )
+
+
+# --- Re-transcription with Ukrainian forced (🇺🇦 reaction) ---
+
+async def fetch_thread_messages(channel_id: str, thread_ts: str, client) -> list:
+    """Every message in the thread, oldest first."""
+    result = await client.conversations_replies(channel=channel_id, ts=thread_ts, limit=200)
+    return result.get("messages", [])
+
+
+def find_source_media(messages: list, target_stem: str | None):
+    """
+    Find the audio/video a transcript came from.
+
+    Scans the whole thread rather than just the parent, because the media may
+    itself have been posted as a reply inside someone else's thread.
+
+    Returns (file_info, reason) — reason is set only when file_info is None.
+    """
+    candidates = [
+        f for message in messages
+        for f in message.get("files", [])
+        if is_audio_or_video(f)
+    ]
+
+    if not candidates:
+        return None, "no_media"
+
+    if target_stem:
+        for f in candidates:
+            if Path(f.get("name", "")).stem.lower() == target_stem.lower():
+                return f, None
+
+    # A single media file in the thread is unambiguous even if the name drifted.
+    if len(candidates) == 1:
+        return candidates[0], None
+
+    return None, "ambiguous"
+
+
+def find_drive_file_id(messages: list, target_stem: str | None, preferred_file_id: str | None) -> str | None:
+    """
+    Locate the Drive doc for this transcript. Mappings are keyed by the Slack
+    file ID of the .txt, so when the reaction landed on the media instead we
+    fall back to scanning the thread for a .txt that has one.
+    """
+    if preferred_file_id:
+        drive_file_id = get_drive_file_id(preferred_file_id)
+        if drive_file_id:
+            return drive_file_id
+
+    for message in messages:
+        for f in message.get("files", []):
+            name = f.get("name", "")
+            if not name.lower().endswith(".txt"):
+                continue
+            if target_stem and strip_derived_suffixes(Path(name).stem).lower() != target_stem.lower():
+                continue
+            drive_file_id = get_drive_file_id(f.get("id"))
+            if drive_file_id:
+                return drive_file_id
+    return None
+
+
+async def handle_ukrainian_retranscription(message: dict, message_ts: str, thread_ts: str,
+                                           channel_id: str, user_id: str, client, request_key: str):
+    """
+    Work out what to re-transcribe from where the 🇺🇦 landed, then hand off.
+
+    Two valid targets: a transcript the bot posted (walk the thread back to its
+    source media) or the media message itself (use it directly).
+    """
+    files = message.get("files", [])
+    media_files = [f for f in files if is_audio_or_video(f)]
+    srt_files = [f for f in files if f.get("name", "").lower().endswith(".srt")]
+    txt_files = [f for f in files if f.get("name", "").lower().endswith(".txt")]
+
+    # Reacted straight on the media: no lookup needed, redo every file in it.
+    if media_files:
+        messages = await fetch_thread_messages(channel_id, thread_ts, client)
+        for media_file in media_files:
+            filename_lower = media_file.get("name", "").lower()
+            polish = is_korotulka_filename(media_file.get("name", ""))
+            if polish or "subtitles" in filename_lower or "субтитри" in filename_lower:
+                mode = "srt_only"
+            elif "both" in filename_lower or "обидва" in filename_lower:
+                mode = "both"
+            else:
+                mode = "txt_only"
+            target_stem = Path(media_file.get("name", "")).stem
+            drive_file_id = find_drive_file_id(messages, target_stem, None)
+            await process_ukrainian_retranscription(
+                media_file, mode, polish, drive_file_id,
+                channel_id, thread_ts, user_id, client, request_key,
+            )
+        return
+
+    reacted_file = (srt_files or txt_files or [None])[0]
+    if not reacted_file:
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=":no_good: Сорі, це не той файл. Постав :flag-ua: на розшифровку (`.txt` або `.srt`) чи на саме аудіо або відео.",
+            thread_ts=thread_ts
+        )
+        _forget_reaction_request(request_key)
+        return
+
+    reacted_name = reacted_file.get("name", "")
+    target_stem = strip_derived_suffixes(Path(reacted_name).stem)
+    mode = "srt_only" if reacted_name.lower().endswith(".srt") else "txt_only"
+
+    if thread_ts == message_ts:
+        logging.info(f"[retranscribe] {reacted_name} is not in a thread, no source media to find.")
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=":no_good: Сорі, не бачу тут вихідного аудіо. Постав :flag-ua: на мою розшифровку всередині треду або прямо на аудіофайл.",
+            thread_ts=message_ts
+        )
+        _forget_reaction_request(request_key)
+        return
+
+    messages = await fetch_thread_messages(channel_id, thread_ts, client)
+    source_media, reason = find_source_media(messages, target_stem)
+
+    if not source_media:
+        logging.info(f"[retranscribe] No usable source media for {reacted_name}: {reason}")
+        if reason == "ambiguous":
+            text = (":thinking_face: У цьому треді кілька медіафайлів, і я не зрозумів, який із них твій. "
+                    "Постав :flag-ua: прямо на повідомлення з потрібним аудіо, і я візьмуся.")
+        else:
+            text = (":no_good: Сорі, вихідного аудіо в цьому треді вже немає — без нього перерозшифрувати не вийде. "
+                    "Закинь файл ще раз, і я зроблю все з нуля.")
+        await client.chat_postMessage(channel=channel_id, text=text, thread_ts=thread_ts)
+        _forget_reaction_request(request_key)
+        return
+
+    polish = is_korotulka_filename(source_media.get("name", ""))
+    drive_file_id = find_drive_file_id(messages, target_stem, reacted_file.get("id"))
+
+    await process_ukrainian_retranscription(
+        source_media, mode, polish, drive_file_id,
+        channel_id, thread_ts, user_id, client, request_key,
+    )
+
+
+async def process_ukrainian_retranscription(source_media: dict, mode: str, polish: bool,
+                                            drive_file_id: str | None, channel_id: str,
+                                            thread_ts: str, user_id: str, client, request_key: str):
+    """Download the original media and transcribe it again with Ukrainian forced."""
+    file_id = source_media.get("id")
+    file_name = source_media.get("name", "audio")
+    base_filename = Path(file_name).stem
+
+    logging.info(f"[retranscribe:{file_id}] Starting Ukrainian re-transcription for {file_name}")
+
+    await client.chat_postMessage(
+        channel=channel_id,
+        text=f":saluting_face: Беру `{file_name}` на другий захід — цього разу українську задам примусово. "
+             f"Відпишу, як буде готово, або якщо щось піде не так.",
+        thread_ts=thread_ts
+    )
+
+    try:
+        fresh_file_info = (await client.files_info(file=file_id))["file"]
+
+        if not is_audio_or_video(fresh_file_info):
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f":no_good: Сорі, `{file_name}` не аудіо і не відео. Таке я не розшифрую.",
+                thread_ts=thread_ts
+            )
+            _forget_reaction_request(request_key)
+            return
+
+        if file_too_large(fresh_file_info):
+            await client.chat_postMessage(
+                channel=channel_id,
+                text=f":no_good: Сорі, файл `{file_name}` завеликий (>1000 МБ).",
+                thread_ts=thread_ts
+            )
+            _forget_reaction_request(request_key)
+            return
+
+        url_private = fresh_file_info.get("url_private")
+        if not url_private:
+            raise ValueError("Could not get file download URL")
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            temp_dir_path = Path(temp_dir)
+            local_path = temp_dir_path / f"{file_id}_{file_name}"
+
+            logging.info(f"[retranscribe:{file_id}] Downloading source media")
+            await download_file_streamed(url_private, local_path, client.token)
+
+            logging.info(f"[retranscribe:{file_id}] Transcribing with language_code={UKRAINIAN_LANGUAGE_CODE}")
+            result_data = await transcribe_with_retries(
+                local_path, file_name, user_id, channel_id, thread_ts, client,
+                language_code=UKRAINIAN_LANGUAGE_CODE,
+            )
+
+            if result_data is None:
+                logging.error(f"[retranscribe:{file_id}] Transcription failed after all retries.")
+                _forget_reaction_request(request_key)
+                return
+
+            username = await resolve_username(user_id, client)
+
+            if mode in ("srt_only", "both"):
+                srt_filename = f"{base_filename}-ukr.srt"
+                srt_path = temp_dir_path / srt_filename
+                srt_text = create_srt_from_json(result_data, max_chars=40, max_duration=4.0, polish=polish)
+                async with aiofiles.open(srt_path, "w", encoding="utf-8") as f:
+                    await f.write(srt_text)
+
+                logging.info(f"[retranscribe:{file_id}] Uploading {srt_filename}")
+                await client.files_upload_v2(
+                    channel=channel_id,
+                    file=str(srt_path),
+                    title=srt_filename,
+                    initial_comment=f":heavy_check_mark: Все вийшло, ось нові субтитри для файлу `{file_name}` "
+                                    f"— цього разу з примусовою українською.",
+                    thread_ts=thread_ts
+                )
+
+            if mode in ("txt_only", "both"):
+                transcript_content = create_transcript(result_data)
+                txt_filename = f"{base_filename}-ukr.txt"
+                txt_path = temp_dir_path / txt_filename
+                async with aiofiles.open(txt_path, "w", encoding="utf-8") as f:
+                    await f.write(transcript_content)
+
+                logging.info(f"[retranscribe:{file_id}] Uploading {txt_filename}")
+                upload_result = await client.files_upload_v2(
+                    channel=channel_id,
+                    file=str(txt_path),
+                    title=txt_filename,
+                    initial_comment=f":heavy_check_mark: Все вийшло, ось нова розшифровка для файлу `{file_name}` "
+                                    f"— цього разу з примусовою українською.",
+                    thread_ts=thread_ts
+                )
+                await asyncio.sleep(2)
+
+                if drive_file_id:
+                    logging.info(f"[retranscribe:{file_id}] Found Drive mapping: {drive_file_id}")
+                    try:
+                        drive_service = get_google_drive_service()
+                        if drive_service:
+                            doc_link = update_docx_with_ukrainian(drive_service, drive_file_id, transcript_content)
+                            if doc_link:
+                                await client.chat_postMessage(
+                                    channel=channel_id,
+                                    text=f":open_file_folder: Я також поклав цю версію в оригінальний "
+                                         f"<{doc_link}|документ на Google Drive>.",
+                                    thread_ts=thread_ts
+                                )
+                                logging.info(f"[retranscribe:{file_id}] Updated Drive doc successfully")
+                            else:
+                                logging.warning(f"[retranscribe:{file_id}] Failed to update Drive doc")
+                    except Exception as e:
+                        logging.error(f"[retranscribe:{file_id}] Error updating Drive doc: {e}")
+
+                    # Carry the mapping over so 🧹 and 🇬🇧 keep working on the new file.
+                    uploaded_files = upload_result.get('files') or (
+                        [upload_result.get('file')] if upload_result.get('file') else []
+                    )
+                    for uploaded_file in uploaded_files:
+                        if uploaded_file and uploaded_file.get('id'):
+                            save_file_mapping(uploaded_file['id'], drive_file_id)
+                            break
+                else:
+                    logging.info(f"[retranscribe:{file_id}] No Drive mapping found")
+                    await client.chat_postMessage(
+                        channel=channel_id,
+                        text=":card_index: Сорі, я не знайшов документ на Google Drive для цієї розшифровки, "
+                             "тому нову версію поклав лише у тред.",
+                        thread_ts=thread_ts
+                    )
+
+            record_transcription(
+                user_id=user_id,
+                username=username,
+                channel_id=channel_id,
+                filename=file_name,
+                mode="retranscribe_uk",
+                file_size=fresh_file_info.get("size", 0),
+            )
+            logging.info(f"[retranscribe:{file_id}] Re-transcription complete")
+
+    except Exception as e:
+        logging.error(f"[retranscribe:{file_id}] Error: {e}", exc_info=True)
+        _forget_reaction_request(request_key)
+        await client.chat_postMessage(
+            channel=channel_id,
+            text=f":pensive: Сорі, не вдалося перерозшифрувати `{file_name}`. Помилка: {e}",
             thread_ts=thread_ts
         )
