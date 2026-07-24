@@ -4,6 +4,7 @@ import os
 import tempfile
 import time
 import uuid
+from functools import partial
 from pathlib import Path
 from typing import Literal, Optional
 
@@ -12,6 +13,7 @@ import aiohttp
 from fastapi import APIRouter, Depends, HTTPException, status
 from pydantic import BaseModel, Field
 
+from language_check import detect_russian_drift, format_offset
 from srt_polish import is_korotulka_filename
 from helpers import (
     transcribe_file,
@@ -44,11 +46,60 @@ class TranscribeRequest(BaseModel):
     filename: str = Field(..., description="Original filename — used for output naming and Slack message text")
     mode: Literal["txt", "srt", "both"] = Field("txt")
     username: str = Field("Anton", description="Drive folder name within Transponster shared drive")
+    language_code: Optional[str] = Field(
+        None,
+        pattern=r"^[a-z]{2,3}$",
+        description="Force the STT language (ISO-639 code ElevenLabs understands, e.g. 'ukr'). "
+                    "Default None keeps auto-detect — same tradeoff as the 🇺🇦 reaction in chat: "
+                    "auto-detect drifts between Ukrainian and Russian on weak audio.",
+    )
+
+
+def artifact_base(filename: str, language_code: Optional[str]) -> str:
+    """Output basename. A forced-language rerun MUST NOT reuse the original
+    basename: Anton's delivery dedups Slack uploads by filename, so `ep17.txt`
+    already in the thread would read as \"delivered\" and the rerun would
+    silently re-deliver the OLD transcript. Mirror the chat path's suffix:
+    ep17 → ep17-ukr (slack_events.py does the same for the 🇺🇦 reaction)."""
+    base = Path(filename).stem
+    return f"{base}-{language_code}" if language_code else base
+
+
+def language_drift_payload(result_data: dict, language_code: Optional[str],
+                           filename: str = "") -> Optional[dict]:
+    """The API twin of warn_about_russian_drift: same detector, but the consumer
+    is a machine (Anton's delivery worker), so the nudge ships as data with a
+    ready-to-post note instead of a chat message. Skipped entirely on forced
+    runs — the caller already chose the language, nagging would be noise."""
+    if language_code:
+        return None
+    try:
+        drift = detect_russian_drift(result_data)
+    except Exception:
+        logging.exception("[api/transcribe] language drift check failed")
+        return None
+    if not drift:
+        return None
+    offset = format_offset(drift["first_start"])
+    where = f" (десь від {offset})" if offset else ""
+    named = f" файлу `{filename}`" if filename else ""
+    return {
+        **drift,
+        "note": (
+            f":eyes: Здається, у розшифровку{named} місцями заїхала російська{where} — так буває, "
+            f"коли мова визначається автоматично. Скажи мені — і я перероблю цей файл "
+            f"з примусовою українською (це нова розшифровка з аудіо, не переклад)."
+        ),
+    }
 
 
 class TranscribeJobCreated(BaseModel):
     job_id: str
     status: str = "queued"
+    # Echoed so the client can VERIFY the server honoured the field — an older
+    # Transponster silently ignores unknown request fields, and a "forced
+    # Ukrainian" receipt that the server never saw would be a lie (Codex).
+    language_code: Optional[str] = None
 
 
 @router.post("/transcribe", response_model=TranscribeJobCreated, status_code=status.HTTP_202_ACCEPTED)
@@ -62,10 +113,12 @@ async def transcribe_start(req: TranscribeRequest, _: None = Depends(require_bea
         "filename": req.filename,
         "mode": req.mode,
         "username": req.username,
+        "language_code": req.language_code,
     }
     asyncio.create_task(_run_job(job_id, req))
-    logging.info(f"[api/transcribe] queued job {job_id} for {req.filename!r} mode={req.mode}")
-    return TranscribeJobCreated(job_id=job_id, status="queued")
+    logging.info(f"[api/transcribe] queued job {job_id} for {req.filename!r} "
+                 f"mode={req.mode} language_code={req.language_code}")
+    return TranscribeJobCreated(job_id=job_id, status="queued", language_code=req.language_code)
 
 
 @router.get("/transcribe/{job_id}")
@@ -109,7 +162,9 @@ async def _run_job(job_id: str, req: TranscribeRequest):
         # 2. ElevenLabs transcription (blocking → executor)
         job["step"] = "transcribing"
         loop = asyncio.get_running_loop()
-        result_data = await loop.run_in_executor(None, transcribe_file, str(temp_file))
+        result_data = await loop.run_in_executor(
+            None, partial(transcribe_file, str(temp_file), language_code=req.language_code)
+        )
 
         # 3. Generate outputs
         job["step"] = "generating"
@@ -125,7 +180,7 @@ async def _run_job(job_id: str, req: TranscribeRequest):
         drive_doc_link: Optional[str] = None
         drive_folder_link: Optional[str] = None
         drive_folder_created = False
-        base = Path(req.filename).stem
+        base = artifact_base(req.filename, req.language_code)
 
         if txt_content is not None:
             job["step"] = "drive_upload"
@@ -172,6 +227,8 @@ async def _run_job(job_id: str, req: TranscribeRequest):
             "result": {
                 "filename_base": base,
                 "mode": req.mode,
+                "language_code": req.language_code,
+                "language_drift": language_drift_payload(result_data, req.language_code, req.filename),
                 "txt_content": txt_content,
                 "srt_content": srt_content,
                 "drive_doc_link": drive_doc_link,
